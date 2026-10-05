@@ -9,16 +9,16 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.1.1"
 SERVER_NAME = "hardware-check"
 
-# User-Agent per Wikipedia (correzione A)
+# User-Agent per Wikipedia
 HEADERS = {
     "User-Agent": "hardware-check-mcp/1.1 (github.com/carellif-lgtm/hardware-check; contact: carellif-lgtm)",
     "Accept": "application/json",
 }
 
-# Campi specifiche da estrarre
+# Campi specifiche da estrarre (testo grezzo, nessuna normalizzazione)
 SPEC_FIELDS = (
     "soc",
     "cpu",
@@ -28,13 +28,13 @@ SPEC_FIELDS = (
     "battery",
 )
 
-# Database URL per cache (correzione D)
+# Database URL per cache
 DATABASE_URL = os.getenv("DATABASE_URL")
 CACHE_TTL_HOURS = 24
 
 
 def _get_db_connection():
-    """Ottiene connessione DB con fallback graceful (correzione D)."""
+    """Ottiene connessione DB con fallback graceful."""
     if not DATABASE_URL:
         return None
     try:
@@ -175,14 +175,14 @@ def _fetch_wikipedia_infobox(title: str) -> dict | None:
                 if not revisions:
                     return None
                 text = revisions[0].get("slots", {}).get("main", {}).get("*", "")
-                return _parse_infobox(text)
+                return _parse_infobox_raw(text)
     except Exception:
         pass
     return None
 
 
-def _parse_infobox(text: str) -> dict:
-    """Parsa infobox Wikipedia estraendo campi specifici."""
+def _parse_infobox_raw(text: str) -> dict:
+    """Parsa infobox Wikipedia estraendo testo GREZZO (nessuna normalizzazione)."""
     infobox_match = re.search(r"\{\{Infobox[^}]*\}\}", text, re.DOTALL | re.IGNORECASE)
     if not infobox_match:
         return {}
@@ -190,10 +190,13 @@ def _parse_infobox(text: str) -> dict:
     infobox_text = infobox_match.group(0)
     fields = {}
     
+    # Estrae ogni campo come testo grezzo (con newline se presenti)
     for field in SPEC_FIELDS:
-        pattern = rf"\|\s*{field}\s*=\s*([^|\n]+)"
-        match = re.search(pattern, infobox_text, re.IGNORECASE)
+        # Pattern che cattura tutto il valore fino al prossimo | o fine infobox
+        pattern = rf"\|\s*{field}\s*=\s*([^|]+)(?=\||\}})"
+        match = re.search(pattern, infobox_text, re.IGNORECASE | re.DOTALL)
         if match:
+            # Mantiene il testo grezzo, rimuove solo whitespace eccessivi
             value = match.group(1).strip()
             if value:
                 fields[field] = value
@@ -221,8 +224,8 @@ def choose_title(query: str, titles: list[str]) -> tuple[str | None, dict | None
 
 
 def extract_infobox_fields(text: str) -> dict:
-    """Estrae campi infobox da testo Wikipedia."""
-    return _parse_infobox(text)
+    """Estrae campi infobox da testo Wikipedia (testo grezzo)."""
+    return _parse_infobox_raw(text)
 
 
 def get_device(query: str) -> dict:
@@ -265,7 +268,7 @@ def get_device(query: str) -> dict:
 
 
 def get_specs(device_name: str) -> dict:
-    """Ottiene specifiche dispositivo con cache trasparente."""
+    """Ottiene specifiche dispositivo con cache trasparente (testo grezzo)."""
     cleaned = (device_name or "").strip()
     if len(cleaned) < 2:
         raise ValueError("device_name must be at least 2 characters")
@@ -314,7 +317,7 @@ def get_specs(device_name: str) -> dict:
 
 
 def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
-    """Gestisce richiesta MCP JSON-RPC con error handling robusto (correzione C)."""
+    """Gestisce richiesta MCP JSON-RPC con error handling robusto."""
     try:
         request = json.loads(request_body)
     except json.JSONDecodeError as e:
@@ -350,7 +353,7 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
             },
             {
                 "name": "get_specs",
-                "description": "Ottiene specifiche hardware da infobox Wikipedia con cache trasparente",
+                "description": "Ottiene specifiche hardware da infobox Wikipedia (testo grezzo, nessuna normalizzazione)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"device_name": {"type": "string"}},
