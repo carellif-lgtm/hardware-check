@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_VERSION = "1.1.2"
+SERVER_VERSION = "1.1.3"
 SERVER_NAME = "hardware-check"
 
 # User-Agent per Wikipedia
@@ -204,6 +204,63 @@ def _extract_infobox_block(text: str, start: int) -> str | None:
     return None  # Infobox non chiuso
 
 
+def _extract_field_value_at_depth_0(infobox_text: str, field: str) -> str | None:
+    """Estrae valore di un campo dall'infobox, spezzando solo ai | di livello 0."""
+    # Pattern per trovare | field = valore
+    pattern = rf"\|\s*{field}\s*="
+    match = re.search(pattern, infobox_text, re.IGNORECASE)
+    if not match:
+        return None
+    
+    # Inizia dopo il =
+    start = match.end()
+    value_chars = []
+    depth_braces = 0  # {{ }}
+    depth_brackets = 0  # [[ ]]
+    
+    i = start
+    while i < len(infobox_text):
+        char = infobox_text[i]
+        
+        # Gestisci {{ e }}
+        if infobox_text[i:i+2] == "{{":
+            depth_braces += 1
+            value_chars.append("{{")
+            i += 2
+            continue
+        elif infobox_text[i:i+2] == "}}":
+            depth_braces -= 1
+            value_chars.append("}}")
+            i += 2
+            continue
+        
+        # Gestisci [[ e ]]
+        if infobox_text[i:i+2] == "[[":
+            depth_brackets += 1
+            value_chars.append("[[")
+            i += 2
+            continue
+        elif infobox_text[i:i+2] == "]]":
+            depth_brackets -= 1
+            value_chars.append("]]")
+            i += 2
+            continue
+        
+        # Se siamo a profondità 0 e troviamo |, abbiamo finito
+        if char == "|" and depth_braces == 0 and depth_brackets == 0:
+            break
+        
+        # Se siamo a profondità 0 e troviamo }} (fine infobox), abbiamo finito
+        if char == "}" and infobox_text[i:i+2] == "}}" and depth_braces == 0:
+            break
+        
+        value_chars.append(char)
+        i += 1
+    
+    value = "".join(value_chars).strip()
+    return value if value else None
+
+
 def _parse_infobox_robust(text: str) -> dict:
     """Parsa infobox Wikipedia con supporto per template annidati (robusto)."""
     # Trova inizio infobox
@@ -218,16 +275,11 @@ def _parse_infobox_robust(text: str) -> dict:
     
     fields = {}
     
-    # Estrae ogni campo come testo grezzo (gestisce template annidati)
+    # Estrae ogni campo con estrattore a profondità 0
     for field in SPEC_FIELDS:
-        # Pattern che cattura il valore del campo fino al prossimo | o fine infobox
-        # Usa logica di accumulo per gestire {{template}} annidati
-        pattern = rf"\|\s*{field}\s*=\s*([^|]+)(?=\||\}}\})"
-        match = re.search(pattern, infobox_text, re.IGNORECASE | re.DOTALL)
-        if match:
-            value = match.group(1).strip()
-            if value:
-                fields[field] = value
+        value = _extract_field_value_at_depth_0(infobox_text, field)
+        if value:
+            fields[field] = value
     
     return fields
 
@@ -352,7 +404,7 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
         return json.dumps({
             "jsonrpc": "2.0",
             "id": None,
-            "error": {"code": -32700, "message": f"Parse error: {e}"}
+            "error": {"code": -32700, "message": f"Parse error: {e}"
         })
     
     jsonrpc = request.get("jsonrpc", "2.0")
@@ -418,25 +470,25 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
             return json.dumps({
                 "jsonrpc": jsonrpc,
                 "id": req_id,
-                "error": {"code": -32602, "message": f"Invalid params: {e}"}
+                "error": {"code": -32602, "message": f"Invalid params: {e}"
             })
         
         except httpx.HTTPError as e:
             return json.dumps({
                 "jsonrpc": jsonrpc,
                 "id": req_id,
-                "error": {"code": -32603, "message": f"Source unavailable: {type(e).__name__}"}
+                "error": {"code": -32603, "message": f"Source unavailable: {type(e).__name__}"
             })
         
         except Exception as e:
             return json.dumps({
                 "jsonrpc": jsonrpc,
                 "id": req_id,
-                "error": {"code": -32603, "message": f"Internal error: {type(e).__name__}"}
+                "error": {"code": -32603, "message": f"Internal error: {type(e).__name__}"
             })
     
     return json.dumps({
         "jsonrpc": jsonrpc,
         "id": req_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"}
+        "error": {"code": -32601, "message": f"Method not found: {method}"
     })
