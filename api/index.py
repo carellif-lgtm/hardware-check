@@ -1,16 +1,26 @@
-from typing import Any
+import json
 
 
-def handler(request: Any) -> dict:
-    path = getattr(request, "path", "/").split("?", 1)[0]
+def app(environ, start_response):
+    path = environ.get("PATH_INFO", "/")
+
     if path in ("/", "/api/health"):
-        return {
-            "statusCode": 200,
-            "headers": {"content-type": "application/json; charset=utf-8"},
-            "body": '{"status":"ok","service":"hardware-check"}',
-        }
-    return {
-        "statusCode": 404,
-        "headers": {"content-type": "application/json; charset=utf-8"},
-        "body": '{"error":"Not found"}',
-    }
+        body = json.dumps({"status": "ok", "service": "hardware-check"}).encode("utf-8")
+        start_response(
+            "200 OK",
+            [
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+            ],
+        )
+        return [body]
+
+    body = json.dumps({"error": "Not found"}).encode("utf-8")
+    start_response(
+        "404 Not Found",
+        [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+        ],
+    )
+    return [body]
