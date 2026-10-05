@@ -1,9 +1,8 @@
 {
   "version": 2,
-  "rewrites": [
-    { "source": "/", "destination": "/api" },
-    { "source": "/health", "destination": "/api" },
-    { "source": "/api/health", "destination": "/api" },
-    { "source": "/mcp", "destination": "/api" }
+  "routes": [
+    { "src": "/mcp", "dest": "/api/mcp" },
+    { "src": "/", "dest": "/api/health" },
+    { "src": "/api/(.*)", "dest": "/api/$1" }
   ]
 }
