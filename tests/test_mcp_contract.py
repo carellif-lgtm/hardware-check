@@ -181,8 +181,8 @@ def test_handle_mcp_macstudio_family(mock_infobox, mock_opensearch):
 
 
 @patch('hardware_mcp._fetch_wikipedia_opensearch')
-def test_network_timeout_returns_missing(mock_opensearch):
-    """Verifica che timeout di rete restituisca article_type: missing (non errore)."""
+def test_network_timeout_returns_structured_error(mock_opensearch):
+    """Verifica che timeout di rete restituisca errore JSON-RPC -32603 (NON missing)."""
     # Mock: timeout di rete
     mock_opensearch.side_effect = httpx.TimeoutException("Request timed out")
     
@@ -198,16 +198,15 @@ def test_network_timeout_returns_missing(mock_opensearch):
     response = handle_mcp_request(request)
     data = json.loads(response)
     
-    # Timeout: trattato come missing (articolo non trovato)
-    assert "result" in data
-    metadata = data["result"]["content"][0]["text"]
-    metadata_json = json.loads(metadata)
-    assert metadata_json["metadata"]["article_type"] == "missing"
+    # Errore di rete != pagina mancante: errore strutturato, nessun result
+    assert "result" not in data
+    assert data["error"]["code"] == -32603
+    assert data["error"]["message"].startswith("Source unavailable")
 
 
 @patch('hardware_mcp._fetch_wikipedia_opensearch')
-def test_network_connect_error_returns_missing(mock_opensearch):
-    """Verifica che connect error restituisca article_type: missing (non errore)."""
+def test_network_connect_error_returns_structured_error(mock_opensearch):
+    """Verifica che connect error restituisca errore JSON-RPC -32603 (NON missing)."""
     # Mock: connect error
     mock_opensearch.side_effect = httpx.ConnectError("Connection refused")
     
@@ -223,8 +222,7 @@ def test_network_connect_error_returns_missing(mock_opensearch):
     response = handle_mcp_request(request)
     data = json.loads(response)
     
-    # Connect error: trattato come missing
-    assert "result" in data
-    metadata = data["result"]["content"][0]["text"]
-    metadata_json = json.loads(metadata)
-    assert metadata_json["metadata"]["article_type"] == "missing"
+    # Errore di rete != pagina mancante: errore strutturato, nessun result
+    assert "result" not in data
+    assert data["error"]["code"] == -32603
+    assert data["error"]["message"].startswith("Source unavailable")
