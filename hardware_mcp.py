@@ -404,7 +404,7 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
         return json.dumps({
             "jsonrpc": "2.0",
             "id": None,
-            "error": {"code": -32700, "message": f"Parse error: {e}"
+            "error": {"code": -32700, "message": f"Parse error: {e}"}
         })
     
     jsonrpc = request.get("jsonrpc", "2.0")
@@ -470,25 +470,25 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
             return json.dumps({
                 "jsonrpc": jsonrpc,
                 "id": req_id,
-                "error": {"code": -32602, "message": f"Invalid params: {e}"
+                "error": {"code": -32602, "message": f"Invalid params: {e}"}
             })
         
         except httpx.HTTPError as e:
             return json.dumps({
                 "jsonrpc": jsonrpc,
                 "id": req_id,
-                "error": {"code": -32603, "message": f"Source unavailable: {type(e).__name__}"
+                "error": {"code": -32603, "message": f"Source unavailable: {type(e).__name__}"}
             })
         
         except Exception as e:
             return json.dumps({
                 "jsonrpc": jsonrpc,
                 "id": req_id,
-                "error": {"code": -32603, "message": f"Internal error: {type(e).__name__}"
+                "error": {"code": -32603, "message": f"Internal error: {type(e).__name__}"}
             })
     
     return json.dumps({
         "jsonrpc": jsonrpc,
         "id": req_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"
+        "error": {"code": -32601, "message": f"Method not found: {method}"}
     })
