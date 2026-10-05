@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import httpx
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "hardware-check", "version": "0.3.2"}
+SERVER_INFO = {"name": "hardware-check", "version": "0.3.3"}
 OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"
 SPEC_FIELDS = ("soc", "cpu", "memory", "storage", "display", "battery")
 HEADERS = {
@@ -30,9 +30,9 @@ def _strip_links(value: str) -> str:
 
 def _expand_templates(value: str) -> str:
     while "{{" in value and "}}" in value:
-        start = value.find("{{")
-        end = value.find("}}", start)
-        if end < 0:
+        end = value.find("}}")
+        start = value.rfind("{{", 0, end)
+        if start < 0:
             break
         inner = value[start + 2:end]
         name, _, rest = inner.partition("|")
@@ -42,6 +42,8 @@ def _expand_templates(value: str) -> str:
             replacement = parts[0] + " " + parts[1]
         elif key == "resx" and len(parts) >= 2:
             replacement = parts[0] + " x " + parts[1]
+        elif key in ("ubl", "plainlist", "flatlist"):
+            replacement = " | ".join(parts)
         else:
             replacement = ""
         value = value[:start] + replacement + value[end + 2:]
@@ -54,8 +56,6 @@ def _clean_wiki(value: str) -> str:
     value = value.replace("<br />", "; ").replace("<br/>", "; ").replace("<br>", "; ")
     value = _strip_links(value)
     value = _expand_templates(value)
-    value = value.replace("{{ubl", "").replace("{{plainlist", "").replace("{{flatlist", "")
-    value = value.replace("}}", "").replace("{{", "")
     return " ".join(value.split()).strip(" ;|")
 
 
@@ -154,7 +154,7 @@ def get_specs(query: str) -> dict:
         "source_url": source_url,
         "fetched_at": fetched_at,
         "fields": fields,
-        "notes": "Raw infobox text. Multi-variant articles are not collapsed into one ram_gb, storage_gb, display size, or battery_wh.",
+        "notes": "Raw infobox text. Multi-variant articles are not collapsed into one ram_gb, storage_gb, display size, or battery_wh. Convert templates keep the first value and unit only.",
     }
 
 
