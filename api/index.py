@@ -1,1 +1,29 @@
-ZnJvbSBmYXN0YXBpIGltcG9ydCBGYXN0QVBJLCBSZXF1ZXN0LCBSZXNwb25zZQppbXBvcnQganNvbgoKYXBwID0gRmFzdEFQSSgpCgpmcm9tIG1jcF9zZXJ2ZXIuc2VydmVyIGltcG9ydCBoYW5kbGVfbWNwX3JlcXVlc3QKCkBhcHAuYXBpX3JvdXRlKCIvIiwgbWV0aG9kcz1bIkdFVCIsICJQT1NUIiwgIlBVVCIsICJERUxFVEUiXSkKYXN5bmMgZGVmIG1jcF9lbmRwb2ludChyZXF1ZXN0OiBSZXF1ZXN0KToKICAgIGJvZHkgPSBhd2FpdCByZXF1ZXN0LmJvZHkoKQogICAgdHJ5OgogICAgICAgIHBheWxvYWQgPSBqc29uLmxvYWRzKGJvZHkpIGlmIGJvZHkgZWxzZSB7fQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICByZXR1cm4gUmVzcG9uc2Uoc3RhdHVzX2NvZGU9NDAwLCBjb250ZW50PSJJbnZhbGlkIEpTT04iKQoKICAgIHJlc3BvbnNlX3BheWxvYWQgPSBhd2FpdCBoYW5kbGVfbWNwX3JlcXVlc3QocGF5bG9hZCkKCiAgICByZXR1cm4gUmVzcG9uc2UoCiAgICAgICAgc3RhdHVzX2NvZGU9MjAwLAogICAgICAgIGNvbnRlbnQ9anNvbi5kdW1wcyhyZXNwb25zZV9wYXlsb2FkKSwKICAgICAgICBtZWRpYV90eXBlPSJhcHBsaWNhdGlvbi9qc29uIiwKICAgICkK
+from http.server import BaseHTTPRequestHandler
+import json
+import os
+
+
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+
+        if path in ("/", "/api/health"):
+            payload = {
+                "status": "ok",
+                "service": "hardware-check",
+                "database": "configured" if os.getenv("DATABASE_URL") else "not_configured",
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        body = json.dumps({"error": "Not found"}).encode("utf-8")
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
