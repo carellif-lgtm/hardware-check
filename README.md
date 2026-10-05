@@ -1,23 +1,13 @@
 # hardware-check
 
-Server MCP minimo che identifica un dispositivo e cita la fonte. Non inventa punteggi di benchmark e non riduce un articolo multi-variante a un solo numero.
+MCP server per identificare dispositivi hardware e ottenere specifiche da Wikipedia, senza inventare dati.
 
-Produzione: https://hardware-check-main.vercel.app
+## Principi
 
-## Endpoint verificati
-
-- `GET /` e `GET /api`: health check.
-- `POST /mcp`: una richiesta JSON-RPC, risposta JSON. Metodi: `initialize`, `tools/list`, `tools/call`.
-
-Questo non è il trasporto MCP streamable HTTP con sessione SSE. Un client che richiede quel trasporto non si collega senza un adattatore.
-
-Esempio:
-
-```bash
-curl -s https://hardware-check-main.vercel.app/mcp \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_specs","arguments":{"query":"Pixel 8"}}}'
-```
+- **Meglio nessun dato che dati inventati**: se Wikipedia non ha la pagina, restituisci errore strutturato, non inventare specifiche.
+- **Trasparenza totale**: ogni risposta include `source_url`, `fetched_at` e `confidence`.
+- **Testo grezzo**: il campo `display` è il testo esatto dall'infobox Wikipedia, senza normalizzazioni (es. "157 mm" non diventa "6.2 pollici").
+- **Nessun benchmark**: i benchmark (Geekbench, ecc.) non sono inclusi perché le fonti sono bloccate (403/Cloudflare).
 
 ## Tool
 
@@ -25,17 +15,74 @@ curl -s https://hardware-check-main.vercel.app/mcp \
 - `get_specs`: testo dell'infobox Wikipedia per `soc`, `cpu`, `memory`, `storage`, `display`, `battery`, solo se presente. Ogni campo ha `source_url`, `fetched_at` e `confidence`. I campi vuoti sono omessi.
 
 Il display non è normalizzato. Per Pixel 8, verificato il 5 ottobre 2026, il valore è il testo grezzo delle due varianti:
+- `"157 mm FHD+ 1080p OLED at 428 ppi"` o simile (dipende dall'infobox)
+- NON convertito in "6.2 pollici"
 
-```text
-Pixel 8: | 157 mm FHD+ 1080p OLED at 428 ppi | 2400 x 1080 px (20:9) | 60-120 Hz refresh rate | Pixel 8 Pro: | 170 mm QHD+ 1440p LTPO OLED at 489 ppi | 2992 x 1344 px (20:9) | 1-120 Hz refresh rate | Both: HDR
+## Esempi
+
+### Health check
+
+```bash
+curl -s https://hardware-check-main.vercel.app/ | jq
 ```
 
-`157 mm` è il primo valore del template `convert`, non una conversione in pollici. Non viene prodotto un unico `size_in` perché l'articolo copre Pixel 8 e Pixel 8 Pro.
+### Initialize
 
-## Benchmark
+```bash
+curl -s -X POST https://hardware-check-main.vercel.app/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | jq
+```
 
-Nessun benchmark è supportato. `get_benchmarks` non è esposto. Geekbench Browser risponde 403. GSMArena risponde con una pagina di controllo Cloudflare, non con un risultato dispositivo. Un punteggio assente non viene stimato.
+### get_device
 
-## Database
+```bash
+curl -s -X POST https://hardware-check-main.vercel.app/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_device","arguments":{"query":"Pixel 8"}}}' | jq
+```
 
-`db/schema.py` descrive tabelle previste. Neon non è tra i connettori di questa sessione, quindi le tabelle non sono state verificate e nessun dato è stato scritto. La persistenza richiede una connection string impostata come variabile d'ambiente, non nel repository.
+### get_specs
+
+```bash
+curl -s -X POST https://hardware-check-main.vercel.app/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_specs","arguments":{"device_name":"Pixel 8"}}}' | jq
+```
+
+### get_specs con errore (pagina mancante)
+
+```bash
+curl -s -X POST https://hardware-check-main.vercel.app/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_specs","arguments":{"device_name":"Geekom Mini IT13"}}}' | jq
+```
+
+Output atteso: `metadata.article_type = "missing"` (nessuna pagina Wikipedia dedicata).
+
+## Struttura del database (Neon)
+
+- `devices`: lista dispositivi identificati (vuota all'inizio).
+- `device_specs`: specifiche estratte (vuota all'inizio).
+- `device_benchmarks`: non usata (i benchmark non sono supportati).
+- `cache_specs`: cache trasparente delle risposte `get_specs` con TTL 24h.
+
+## Limiti noti
+
+- **Geekom Mini IT13**: nessuna pagina Wikipedia dedicata → errore strutturato, non un bug.
+- **Mac Studio M2 Max**: pagina Wikipedia della famiglia "Mac Studio" → solo `system_on_chip: Apple M series`, altri campi assenti.
+- **Wikipedia down**: se Wikipedia non risponde, errore `-32603` con messaggio "Network error: Wikipedia unreachable", NON `article_type: missing`.
+
+## Sviluppo
+
+```bash
+# Installa dipendenze
+pip install -r requirements.txt
+
+# Esegui test (alcuni richiedono rete)
+python3 -m pytest tests -v
+```
+
+## License
+
+MIT
