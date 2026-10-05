@@ -14,12 +14,15 @@ PIXEL_INFOBOX = """
 | '''Pixel 8:''' 8&nbsp;GB [[LPDDR5X]]
 | '''Pixel 8 Pro:''' 12&nbsp;GB LPDDR5X
 }}
-| storage = 128 or 256 GB
-| battery = {{ubl
-| '''Pixel 8:''' 4575&nbsp;mAh
+| display = {{ubl
+|'''Pixel 8:'''
+|{{convert|157|mm|in|1|abbr=on|order=flip}} [[FHD+]] [[1080p]] [[OLED]] at 428&nbsp;[[Pixels per inch|ppi]]
+|{{resx|2400|1080}}&nbsp;px (20:9)
+|60-120&nbsp;[[Hertz|Hz]] [[refresh rate]]
+|'''Pixel 8 Pro:'''
+|{{resx|2992|1344}}&nbsp;px
 }}
-| display = {{convert|157|mm|in|1}}
-| next = ignored
+| rear_camera = ignored
 }}
 """
 
@@ -41,10 +44,12 @@ def test_missing_query_is_an_error_result():
     assert called["result"]["isError"] is True
 
 
-def test_infobox_parser_keeps_variants_and_skips_empty_fields():
+def test_infobox_parser_keeps_display_until_next_key():
     fields = extract_infobox_fields(PIXEL_INFOBOX)
     assert "cpu" not in fields
     assert "Pixel 8: 8 GB LPDDR5X" in fields["memory"]
-    assert "Pixel 8 Pro: 12 GB LPDDR5X" in fields["memory"]
-    assert fields["soc"] == "Google Tensor G3"
-    assert "4575 mAh" in fields["battery"]
+    assert "157 mm" in fields["display"]
+    assert "2400 x 1080" in fields["display"]
+    assert "2992 x 1344" in fields["display"]
+    assert "60-120 Hz refresh rate" in fields["display"]
+    assert "rear_camera" not in fields

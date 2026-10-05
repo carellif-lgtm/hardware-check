@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import httpx
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "hardware-check", "version": "0.3.1"}
+SERVER_INFO = {"name": "hardware-check", "version": "0.3.2"}
 OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"
 SPEC_FIELDS = ("soc", "cpu", "memory", "storage", "display", "battery")
 HEADERS = {
@@ -28,14 +28,49 @@ def _strip_links(value: str) -> str:
     return value
 
 
+def _expand_templates(value: str) -> str:
+    while "{{" in value and "}}" in value:
+        start = value.find("{{")
+        end = value.find("}}", start)
+        if end < 0:
+            break
+        inner = value[start + 2:end]
+        name, _, rest = inner.partition("|")
+        parts = [part.strip() for part in rest.split("|") if part.strip()]
+        key = name.strip().lower()
+        if key == "convert" and len(parts) >= 2:
+            replacement = parts[0] + " " + parts[1]
+        elif key == "resx" and len(parts) >= 2:
+            replacement = parts[0] + " x " + parts[1]
+        else:
+            replacement = ""
+        value = value[:start] + replacement + value[end + 2:]
+    return value
+
+
 def _clean_wiki(value: str) -> str:
     value = value.replace("&nbsp;", " ").replace("\xa0", " ")
     value = value.replace("'''", "").replace("''", "")
     value = value.replace("<br />", "; ").replace("<br/>", "; ").replace("<br>", "; ")
     value = _strip_links(value)
+    value = _expand_templates(value)
     value = value.replace("{{ubl", "").replace("{{plainlist", "").replace("{{flatlist", "")
     value = value.replace("}}", "").replace("{{", "")
     return " ".join(value.split()).strip(" ;|")
+
+
+def _field_start(line):
+    stripped = line.lstrip()
+    if not stripped.startswith("|"):
+        return None
+    body = stripped[1:].lstrip()
+    if "=" not in body:
+        return None
+    name, _, rest = body.partition("=")
+    name = name.strip()
+    if not name or not all(ch.isalnum() or ch == "_" for ch in name):
+        return None
+    return name, rest
 
 
 def extract_infobox_fields(wikitext: str) -> dict:
@@ -46,14 +81,13 @@ def extract_infobox_fields(wikitext: str) -> dict:
     buf = []
     fields = {}
     for line in wikitext[start:].splitlines()[1:]:
-        stripped = line.lstrip()
-        if stripped.startswith("|") and "=" in stripped:
+        started = _field_start(line)
+        if started:
             if current in SPEC_FIELDS:
                 cleaned = _clean_wiki(" ".join(buf))
                 if cleaned:
                     fields[current] = cleaned
-            name, _, rest = stripped[1:].partition("=")
-            current = name.strip()
+            current, rest = started
             buf = [rest]
             continue
         if current:
@@ -120,7 +154,7 @@ def get_specs(query: str) -> dict:
         "source_url": source_url,
         "fetched_at": fetched_at,
         "fields": fields,
-        "notes": "Raw infobox text. Multi-variant articles are not collapsed into one ram_gb, storage_gb, or battery_wh.",
+        "notes": "Raw infobox text. Multi-variant articles are not collapsed into one ram_gb, storage_gb, display size, or battery_wh.",
     }
 
 
