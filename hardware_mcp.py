@@ -508,5 +508,5 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
     return json.dumps({
         "jsonrpc": jsonrpc,
         "id": req_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"
+        "error": {"code": -32601, "message": f"Method not found: {method}"}
     })
