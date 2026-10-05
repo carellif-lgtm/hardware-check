@@ -1,83 +1,67 @@
 import json
-import traceback
+import os
+import sys
+from typing import Any
 
-OK_PATHS = {"/", "/api", "/api/index", "/api/health", "/health", "/index"}
-MCP_PATHS = {"/mcp", "/api/mcp"}
+# Aggiungi parent directory al path per importare hardware_mcp
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
-def _paths(environ):
-    values = []
-    for key in ("PATH_INFO", "HTTP_X_VERCEL_ORIGINAL_PATH", "HTTP_X_INVOKE_PATH", "HTTP_X_MATCHED_PATH"):
-        raw = environ.get(key)
-        if not raw:
-            continue
-        path = raw.split("?", 1)[0].rstrip("/") or "/"
-        values.append(path)
-    return values or ["/"]
+from hardware_mcp import handle_mcp_request
 
 
-def _response(start_response, status, body):
-    encoded = body.encode("utf-8")
-    start_response(
-        status,
-        [
-            ("Content-Type", "application/json; charset=utf-8"),
-            ("Content-Length", str(len(encoded))),
-        ],
-    )
-    return [encoded]
+def handler(environ: dict, start_response: callable) -> list[bytes]:
+    """WSGI handler per Vercel."""
+    path = environ.get("PATH_INFO", "/").rstrip("/") or "/"
+    method = environ.get("REQUEST_METHOD", "GET")
+    
+    # Health check
+    if path == "/" or path == "/health" or path == "/api/health":
+        if method == "GET":
+            body = json.dumps({
+                "status": "ok",
+                "service": "hardware-check",
+                "version": "1.1.3"
+            })
+            start_response("200 OK", [("Content-Type", "application/json")])
+            return [body.encode("utf-8")]
+        else:
+            start_response("405 Method Not Allowed", [("Content-Type", "application/json")])
+            return [b'{"error": "Method not allowed"}']
+    
+    # MCP endpoint
+    if path == "/mcp" or path == "/api/mcp":
+        if method == "POST":
+            try:
+                content_length = int(environ.get("CONTENT_LENGTH", 0))
+                body_bytes = environ["wsgi.input"].read(content_length)
+                request_body = body_bytes.decode("utf-8")
+                
+                # handle_mcp_request accetta stringa e restituisce stringa
+                response_body = handle_mcp_request(request_body, environ)
+                
+                start_response("200 OK", [("Content-Type", "application/json")])
+                return [response_body.encode("utf-8")]
+            
+            except Exception as e:
+                error_response = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": f"Internal error: {e}"}
+                })
+                start_response("200 OK", [("Content-Type", "application/json")])
+                return [error_response.encode("utf-8")]
+        else:
+            start_response("405 Method Not Allowed", [("Content-Type", "application/json")])
+            return [b'{"error": "Method not allowed"}']
+    
+    # 404 per altri path
+    start_response("404 Not Found", [("Content-Type", "application/json")])
+    return [b'{"error": "Not found"}']
 
 
-def app(environ, start_response):
-    method = environ.get("REQUEST_METHOD", "GET").upper()
-    paths = _paths(environ)
-
-    if method == "POST" or any(path in MCP_PATHS for path in paths):
-        if method != "POST":
-            return _response(
-                start_response,
-                "405 Method Not Allowed",
-                json.dumps({"error": "POST a JSON-RPC body to /mcp"}),
-            )
-        length = int(environ.get("CONTENT_LENGTH") or 0)
-        raw = environ["wsgi.input"].read(length) if length else b"{}"
-        try:
-            payload = json.loads(raw.decode("utf-8") or "{}")
-        except json.JSONDecodeError:
-            return _response(
-                start_response,
-                "400 Bad Request",
-                json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}),
-            )
-        try:
-            from hardware_mcp import handle_mcp_request
-
-            status, result = handle_mcp_request(payload)
-        except Exception as exc:
-            return _response(
-                start_response,
-                "200 OK",
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": payload.get("id") if isinstance(payload, dict) else None,
-                        "error": {
-                            "code": -32603,
-                            "message": f"{type(exc).__name__}: {exc}",
-                            "data": traceback.format_exc()[-1200:],
-                        },
-                    }
-                ),
-            )
-        if result is None:
-            start_response("202 Accepted", [("Content-Length", "0")])
-            return [b""]
-        return _response(start_response, "200 OK", json.dumps(result))
-
-    if any(path in OK_PATHS for path in paths):
-        return _response(
-            start_response,
-            "200 OK",
-            json.dumps({"status": "ok", "service": "hardware-check", "phase": "mcp-min", "mcp": "/mcp"}),
-        )
-    return _response(start_response, "404 Not Found", json.dumps({"error": "Not found"}))
+# Per esecuzione locale con wsgiref
+if __name__ == "__main__":
+    from wsgiref.simple_server import make_server
+    server = make_server("localhost", 8000, handler)
+    print("Serving on http://localhost:8000")
+    server.serve_forever()
