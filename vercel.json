@@ -1,8 +1,8 @@
 {
   "version": 2,
   "routes": [
-    { "src": "/mcp", "dest": "/api/mcp" },
-    { "src": "/", "dest": "/api/health" },
-    { "src": "/api/(.*)", "dest": "/api/$1" }
+    { "src": "/mcp", "dest": "/api/index" },
+    { "src": "/api/(.*)", "dest": "/api/index" },
+    { "src": "/", "dest": "/api/index" }
   ]
 }
