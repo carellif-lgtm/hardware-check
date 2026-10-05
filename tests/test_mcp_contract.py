@@ -1,10 +1,12 @@
 import pathlib
 import sys
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from hardware_mcp import choose_title, extract_infobox_fields, handle_mcp_request
 import json
+import httpx
 
 
 def test_choose_title_model():
@@ -124,8 +126,14 @@ def test_handle_mcp_tools_list():
     assert "get_specs" in tools
 
 
-def test_handle_mcp_geekom_missing():
-    """Verifica che Geekom restituisca metadata article_type: missing."""
+@patch('hardware_mcp._fetch_wikipedia_opensearch')
+@patch('hardware_mcp._fetch_wikipedia_infobox')
+def test_handle_mcp_geekom_missing(mock_infobox, mock_opensearch):
+    """Verifica che Geekom restituisca metadata article_type: missing (mock, no rete)."""
+    # Mock: Wikipedia risponde con pagina non trovata (404)
+    mock_opensearch.return_value = (None, None)
+    mock_infobox.return_value = {}
+    
     request = json.dumps({
         "jsonrpc": "2.0",
         "id": 3,
@@ -137,16 +145,22 @@ def test_handle_mcp_geekom_missing():
     })
     response = handle_mcp_request(request)
     data = json.loads(response)
+    
     # Non deve restituire errore 500
-    assert "error" not in data or data.get("result")
-    if "result" in data:
-        metadata = data["result"]["content"][0]["text"]
-        metadata_json = json.loads(metadata)
-        assert metadata_json["metadata"]["article_type"] == "missing"
+    assert "result" in data
+    metadata = data["result"]["content"][0]["text"]
+    metadata_json = json.loads(metadata)
+    assert metadata_json["metadata"]["article_type"] == "missing"
 
 
-def test_handle_mcp_macstudio_family():
-    """Verifica che Mac Studio restituisca metadata article_type: family."""
+@patch('hardware_mcp._fetch_wikipedia_opensearch')
+@patch('hardware_mcp._fetch_wikipedia_infobox')
+def test_handle_mcp_macstudio_family(mock_infobox, mock_opensearch):
+    """Verifica che Mac Studio restituisca metadata article_type: family (mock, no rete)."""
+    # Mock: Wikipedia risponde con pagina famiglia (pochi campi)
+    mock_opensearch.return_value = ("Mac Studio", "https://en.wikipedia.org/wiki/Mac_Studio")
+    mock_infobox.return_value = {"soc": "Apple M series"}  # Solo soc, pochi campi
+    
     request = json.dumps({
         "jsonrpc": "2.0",
         "id": 4,
@@ -158,8 +172,59 @@ def test_handle_mcp_macstudio_family():
     })
     response = handle_mcp_request(request)
     data = json.loads(response)
+    
     assert "result" in data
     metadata = data["result"]["content"][0]["text"]
     metadata_json = json.loads(metadata)
-    # article_type dovrebbe essere "family" dato che Mac Studio ha pochi campi
-    assert metadata_json["metadata"]["article_type"] in ["family", "model"]
+    # article_type dovrebbe essere "family" dato che ha solo 1 campo
+    assert metadata_json["metadata"]["article_type"] == "family"
+
+
+@patch('hardware_mcp._fetch_wikipedia_opensearch')
+def test_network_timeout_returns_missing(mock_opensearch):
+    """Verifica che timeout di rete restituisca article_type: missing (non errore)."""
+    # Mock: timeout di rete
+    mock_opensearch.side_effect = httpx.TimeoutException("Request timed out")
+    
+    request = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": "get_specs",
+            "arguments": {"device_name": "Pixel 8"}
+        }
+    })
+    response = handle_mcp_request(request)
+    data = json.loads(response)
+    
+    # Timeout: trattato come missing (articolo non trovato)
+    assert "result" in data
+    metadata = data["result"]["content"][0]["text"]
+    metadata_json = json.loads(metadata)
+    assert metadata_json["metadata"]["article_type"] == "missing"
+
+
+@patch('hardware_mcp._fetch_wikipedia_opensearch')
+def test_network_connect_error_returns_missing(mock_opensearch):
+    """Verifica che connect error restituisca article_type: missing (non errore)."""
+    # Mock: connect error
+    mock_opensearch.side_effect = httpx.ConnectError("Connection refused")
+    
+    request = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {
+            "name": "get_specs",
+            "arguments": {"device_name": "Pixel 8"}
+        }
+    })
+    response = handle_mcp_request(request)
+    data = json.loads(response)
+    
+    # Connect error: trattato come missing
+    assert "result" in data
+    metadata = data["result"]["content"][0]["text"]
+    metadata_json = json.loads(metadata)
+    assert metadata_json["metadata"]["article_type"] == "missing"
