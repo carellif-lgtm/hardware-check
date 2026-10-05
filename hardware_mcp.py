@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_VERSION = "1.1.1"
+SERVER_VERSION = "1.1.2"
 SERVER_NAME = "hardware-check"
 
 # User-Agent per Wikipedia
@@ -175,28 +175,56 @@ def _fetch_wikipedia_infobox(title: str) -> dict | None:
                 if not revisions:
                     return None
                 text = revisions[0].get("slots", {}).get("main", {}).get("*", "")
-                return _parse_infobox_raw(text)
+                return _parse_infobox_robust(text)
     except Exception:
         pass
     return None
 
 
-def _parse_infobox_raw(text: str) -> dict:
-    """Parsa infobox Wikipedia estraendo testo GREZZO (nessuna normalizzazione)."""
-    infobox_match = re.search(r"\{\{Infobox[^}]*\}\}", text, re.DOTALL | re.IGNORECASE)
-    if not infobox_match:
+def _extract_infobox_block(text: str, start: int) -> str | None:
+    """Estrae blocco infobox contando parentesi graffe annidate (parser a stati)."""
+    if not text[start:].startswith("{{"):
+        return None
+    
+    depth = 0
+    i = start
+    
+    while i < len(text):
+        if text[i:i+2] == "{{":
+            depth += 1
+            i += 2
+        elif text[i:i+2] == "}}":
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return text[start:i]
+        else:
+            i += 1
+    
+    return None  # Infobox non chiuso
+
+
+def _parse_infobox_robust(text: str) -> dict:
+    """Parsa infobox Wikipedia con supporto per template annidati (robusto)."""
+    # Trova inizio infobox
+    match = re.search(r"\{\{Infobox", text, re.IGNORECASE)
+    if not match:
         return {}
     
-    infobox_text = infobox_match.group(0)
+    # Estrae blocco completo con parser a stati
+    infobox_text = _extract_infobox_block(text, match.start())
+    if not infobox_text:
+        return {}
+    
     fields = {}
     
-    # Estrae ogni campo come testo grezzo (con newline se presenti)
+    # Estrae ogni campo come testo grezzo (gestisce template annidati)
     for field in SPEC_FIELDS:
-        # Pattern che cattura tutto il valore fino al prossimo | o fine infobox
-        pattern = rf"\|\s*{field}\s*=\s*([^|]+)(?=\||\}})"
+        # Pattern che cattura il valore del campo fino al prossimo | o fine infobox
+        # Usa logica di accumulo per gestire {{template}} annidati
+        pattern = rf"\|\s*{field}\s*=\s*([^|]+)(?=\||\}}\})"
         match = re.search(pattern, infobox_text, re.IGNORECASE | re.DOTALL)
         if match:
-            # Mantiene il testo grezzo, rimuove solo whitespace eccessivi
             value = match.group(1).strip()
             if value:
                 fields[field] = value
@@ -224,8 +252,8 @@ def choose_title(query: str, titles: list[str]) -> tuple[str | None, dict | None
 
 
 def extract_infobox_fields(text: str) -> dict:
-    """Estrae campi infobox da testo Wikipedia (testo grezzo)."""
-    return _parse_infobox_raw(text)
+    """Estrae campi infobox da testo Wikipedia (testo grezzo, parser robusto)."""
+    return _parse_infobox_robust(text)
 
 
 def get_device(query: str) -> dict:
@@ -353,7 +381,7 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
             },
             {
                 "name": "get_specs",
-                "description": "Ottiene specifiche hardware da infobox Wikipedia (testo grezzo, nessuna normalizzazione)",
+                "description": "Ottiene specifiche hardware da infobox Wikipedia (testo grezzo, parser robusto)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"device_name": {"type": "string"}},
