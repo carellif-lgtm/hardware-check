@@ -1,4 +1,5 @@
 import json
+import traceback
 
 OK_PATHS = {"/", "/api", "/api/index", "/api/health", "/health", "/index"}
 MCP_PATHS = {"/mcp", "/api/mcp"}
@@ -48,13 +49,30 @@ def app(environ, start_response):
                 "400 Bad Request",
                 json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}),
             )
-        from hardware_mcp import handle_mcp_request
+        try:
+            from hardware_mcp import handle_mcp_request
 
-        status, result = handle_mcp_request(payload)
+            status, result = handle_mcp_request(payload)
+        except Exception as exc:
+            return _response(
+                start_response,
+                "200 OK",
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id") if isinstance(payload, dict) else None,
+                        "error": {
+                            "code": -32603,
+                            "message": f"{type(exc).__name__}: {exc}",
+                            "data": traceback.format_exc()[-1200:],
+                        },
+                    }
+                ),
+            )
         if result is None:
-            start_response(f"{status} Accepted", [("Content-Length", "0")])
+            start_response("202 Accepted", [("Content-Length", "0")])
             return [b""]
-        return _response(start_response, "200 OK" if status == 200 else f"{status} Error", json.dumps(result))
+        return _response(start_response, "200 OK", json.dumps(result))
 
     if any(path in OK_PATHS for path in paths):
         return _response(
