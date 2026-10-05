@@ -1,279 +1,411 @@
 import json
+import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import httpx
+import psycopg2
+from psycopg2.extras import RealDictCursor, Json
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "hardware-check", "version": "0.3.4"}
-OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"
+SERVER_VERSION = "1.1.0"
+SERVER_NAME = "hardware-check"
+
+# User-Agent per Wikipedia (correzione A)
+HEADERS = {
+    "User-Agent": "hardware-check-mcp/1.1 (github.com/carellif-lgtm/hardware-check; contact: carellif-lgtm)",
+    "Accept": "application/json",
+}
+
+# Campi specifiche da estrarre
 SPEC_FIELDS = (
     "soc",
     "cpu",
-    "processor",
-    "system_on_chip",
-    "graphics",
     "memory",
     "storage",
     "display",
     "battery",
 )
-HEADERS = {
-    "User-Agent": "HardwareCheckMCP/0.3 (+https://github.com/carellif-lgtm/hardware-check)",
-    "Accept": "application/json",
-}
+
+# Database URL per cache (correzione D)
+DATABASE_URL = os.getenv("DATABASE_URL")
+CACHE_TTL_HOURS = 24
 
 
-def _now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _tokens(value: str) -> set:
-    return set(re.findall(r"[a-z0-9]+", value.lower()))
-
-
-def choose_title(query: str, titles: list) -> str:
-    query_tokens = _tokens(query)
-    best = None
-    best_score = 0
-    for title in titles:
-        title_tokens = _tokens(title)
-        if not query_tokens or not title_tokens:
-            continue
-        score = len(query_tokens & title_tokens) / len(query_tokens)
-        if score > best_score or (score == best_score and best and len(title) < len(best)):
-            best = title
-            best_score = score
-    if best is None or best_score < 0.5:
-        raise LookupError("No Wikipedia article found for %r" % query)
-    return best
-
-
-def _strip_links(value: str) -> str:
-    while "[[" in value and "]]" in value:
-        start = value.find("[[")
-        end = value.find("]]", start)
-        if end < 0:
-            break
-        label = value[start + 2:end].split("|")[-1]
-        value = value[:start] + label + value[end + 2:]
-    return value
-
-
-def _expand_templates(value: str) -> str:
-    while "{{" in value and "}}" in value:
-        end = value.find("}}")
-        start = value.rfind("{{", 0, end)
-        if start < 0:
-            break
-        inner = value[start + 2:end]
-        name, _, rest = inner.partition("|")
-        parts = [part.strip() for part in rest.split("|") if part.strip()]
-        key = name.strip().lower()
-        if key == "convert" and len(parts) >= 2:
-            replacement = parts[0] + " " + parts[1]
-        elif key == "resx" and len(parts) >= 2:
-            replacement = parts[0] + " x " + parts[1]
-        elif key in ("ubl", "plainlist", "flatlist"):
-            replacement = " | ".join(parts)
-        else:
-            replacement = ""
-        value = value[:start] + replacement + value[end + 2:]
-    return value
-
-
-def _clean_wiki(value: str) -> str:
-    value = value.replace("&nbsp;", " ").replace("\xa0", " ")
-    value = value.replace("'''", "").replace("''", "")
-    value = value.replace("<br />", "; ").replace("<br/>", "; ").replace("<br>", "; ")
-    value = _strip_links(value)
-    value = _expand_templates(value)
-    return " ".join(value.split()).strip(" ;|")
-
-
-def _field_start(line):
-    stripped = line.lstrip()
-    if not stripped.startswith("|"):
+def _get_db_connection():
+    """Ottiene connessione DB con fallback graceful (correzione D)."""
+    if not DATABASE_URL:
         return None
-    body = stripped[1:].lstrip()
-    if "=" not in body:
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except psycopg2.OperationalError:
         return None
-    name, _, rest = body.partition("=")
-    name = name.strip().lower()
-    if not name or not all(ch.isalnum() or ch == "_" for ch in name):
+    except Exception:
         return None
-    return name, rest
 
 
-def extract_infobox_fields(wikitext: str) -> dict:
-    start = wikitext.find("{{Infobox")
-    if start < 0:
+def _get_cached_specs(device_name: str) -> dict | None:
+    """Cerca specifiche in cache con TTL 24h."""
+    conn = _get_db_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT specs_json, source_url, fetched_at, metadata_json
+                FROM cache_specs
+                WHERE device_name = %s
+                AND expires_at > %s
+                LIMIT 1
+            """, (device_name, datetime.now(timezone.utc)))
+            row = cur.fetchone()
+            
+            if row:
+                return {
+                    "specs": row['specs_json'],
+                    "source_url": row['source_url'],
+                    "fetched_at": row['fetched_at'].isoformat(),
+                    "metadata": row['metadata_json'],
+                    "from_cache": True
+                }
+    except psycopg2.OperationalError:
+        pass
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    
+    return None
+
+
+def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str, metadata: dict) -> None:
+    """Salva specifiche in cache (silente se DB non disponibile)."""
+    conn = _get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO cache_specs (device_name, specs_json, source_url, fetched_at, metadata_json, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (device_name) DO UPDATE
+                SET 
+                    specs_json = EXCLUDED.specs_json,
+                    source_url = EXCLUDED.source_url,
+                    fetched_at = EXCLUDED.fetched_at,
+                    metadata_json = EXCLUDED.metadata_json,
+                    cached_at = NOW(),
+                    expires_at = EXCLUDED.expires_at
+            """, (
+                device_name,
+                specs,
+                source_url,
+                datetime.fromisoformat(fetched_at.replace("Z", "+00:00")),
+                Json(metadata),
+                datetime.now(timezone.utc) + timedelta(hours=CACHE_TTL_HOURS)
+            ))
+            conn.commit()
+    except psycopg2.OperationalError:
+        conn.rollback()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def _build_metadata(article_type: str, fields_found: list, fields_missing: list) -> dict:
+    """Costruisce metadata per la risposta."""
+    return {
+        "article_type": article_type,
+        "fields_found": fields_found,
+        "fields_missing": fields_missing
+    }
+
+
+def _fetch_wikipedia_opensearch(query: str) -> tuple[str | None, str | None]:
+    """Fetch Wikipedia OpenSearch. Restituisce (title, url) o (None, None)."""
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "opensearch",
+        "format": "json",
+        "origin": "*",
+        "search": query,
+        "limit": "1",
+    }
+    try:
+        with httpx.Client(headers=HEADERS, timeout=10.0) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            if len(data) >= 3 and len(data[1]) >= 1:
+                title = data[1][0]
+                link = data[3][0] if len(data) >= 4 and len(data[3]) >= 1 else None
+                return title, link
+    except Exception:
+        pass
+    return None, None
+
+
+def _fetch_wikipedia_infobox(title: str) -> dict | None:
+    """Fetch infobox Wikipedia. Restituisce dict o None in caso di errore."""
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "format": "json",
+        "origin": "*",
+        "titles": title,
+        "prop": "revisions",
+        "rvprop": "content",
+        "rvslots": "main",
+    }
+    try:
+        with httpx.Client(headers=HEADERS, timeout=10.0) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            pages = data.get("query", {}).get("pages", {})
+            for page_id, page_data in pages.items():
+                if int(page_id) < 0:
+                    return None
+                revisions = page_data.get("revisions", [])
+                if not revisions:
+                    return None
+                text = revisions[0].get("slots", {}).get("main", {}).get("*", "")
+                return _parse_infobox(text)
+    except Exception:
+        pass
+    return None
+
+
+def _parse_infobox(text: str) -> dict:
+    """Parsa infobox Wikipedia estraendo campi specifici."""
+    infobox_match = re.search(r"\{\{Infobox[^}]*\}\}", text, re.DOTALL | re.IGNORECASE)
+    if not infobox_match:
         return {}
-    current = None
-    buf = []
+    
+    infobox_text = infobox_match.group(0)
     fields = {}
-    for line in wikitext[start:].splitlines()[1:]:
-        started = _field_start(line)
-        if started:
-            if current in SPEC_FIELDS:
-                cleaned = _clean_wiki(" ".join(buf))
-                if cleaned:
-                    fields[current] = cleaned
-            current, rest = started
-            buf = [rest]
-            continue
-        if current:
-            buf.append(line)
-    if current in SPEC_FIELDS:
-        cleaned = _clean_wiki(" ".join(buf))
-        if cleaned:
-            fields[current] = cleaned
+    
+    for field in SPEC_FIELDS:
+        pattern = rf"\|\s*{field}\s*=\s*([^|\n]+)"
+        match = re.search(pattern, infobox_text, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                fields[field] = value
+    
     return fields
 
 
-def _wikipedia_lookup(query: str):
-    params = {"action": "opensearch", "search": query, "limit": 5, "namespace": 0, "format": "json"}
-    search_params = {"action": "query", "list": "search", "srsearch": query, "srlimit": 5, "format": "json"}
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=12.0) as client:
-        response = client.get(OPENSEARCH_URL, params=params)
-        response.raise_for_status()
-        payload = response.json()
-        searched = client.get(OPENSEARCH_URL, params=search_params)
-        searched.raise_for_status()
-        hits = searched.json().get("query", {}).get("search", [])
-    titles = list(payload[1] if len(payload) > 1 else [])
-    urls = list(payload[3] if len(payload) > 3 else [])
-    by_title = {title: url for title, url in zip(titles, urls)}
-    for hit in hits:
-        title = hit.get("title")
-        if title and title not in by_title:
-            by_title[title] = "https://en.wikipedia.org/wiki/" + title.replace(" ", "_")
-    title = choose_title(query, list(by_title))
-    return title, by_title[title]
+def choose_title(query: str, titles: list[str]) -> tuple[str | None, dict | None]:
+    """Sceglie titolo migliore e restituisce metadata."""
+    if not titles:
+        return None, _build_metadata("missing", [], list(SPEC_FIELDS))
+    
+    query_lower = query.lower()
+    
+    for title in titles:
+        if query_lower in title.lower():
+            fields_found = []
+            fields_missing = [f for f in SPEC_FIELDS if f not in fields_found]
+            return title, _build_metadata("model", fields_found, fields_missing)
+    
+    first_title = titles[0]
+    fields_found = []
+    fields_missing = [f for f in SPEC_FIELDS if f not in fields_found]
+    return first_title, _build_metadata("family", fields_found, fields_missing)
+
+
+def extract_infobox_fields(text: str) -> dict:
+    """Estrae campi infobox da testo Wikipedia."""
+    return _parse_infobox(text)
 
 
 def get_device(query: str) -> dict:
+    """Ottiene info dispositivo da Wikipedia OpenSearch."""
     cleaned = (query or "").strip()
     if len(cleaned) < 2:
         raise ValueError("query must be at least 2 characters")
-    title, source_url = _wikipedia_lookup(cleaned)
-    notes = "Identity and canonical URL only. Benchmark scores are not inferred."
-    if _tokens(cleaned) != _tokens(title):
-        notes = "Matched a related Wikipedia article, not a separate page for the exact query. " + notes
+    
+    title, wiki_url = _fetch_wikipedia_opensearch(cleaned)
+    
+    if not title:
+        fields_missing = list(SPEC_FIELDS)
+        return {
+            "name": cleaned,
+            "source_url": None,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "confidence": "low",
+            "metadata": _build_metadata("missing", [], fields_missing)
+        }
+    
+    infobox_fields = _fetch_wikipedia_infobox(title) if wiki_url else {}
+    
+    fields_found = list(infobox_fields.keys())
+    fields_missing = [f for f in SPEC_FIELDS if f not in infobox_fields]
+    
+    if len(infobox_fields) < 3:
+        article_type = "family"
+        confidence = "medium"
+    else:
+        article_type = "model"
+        confidence = "high"
+    
     return {
-        "query": cleaned,
         "name": title,
-        "category": "device",
-        "source_name": "Wikipedia",
-        "source_url": source_url,
-        "fetched_at": _now(),
-        "confidence": "medium",
-        "notes": notes,
+        "source_url": wiki_url,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "confidence": confidence,
+        "metadata": _build_metadata(article_type, fields_found, fields_missing)
     }
 
 
-def get_specs(query: str) -> dict:
-    cleaned = (query or "").strip()
+def get_specs(device_name: str) -> dict:
+    """Ottiene specifiche dispositivo con cache trasparente."""
+    cleaned = (device_name or "").strip()
     if len(cleaned) < 2:
-        raise ValueError("query must be at least 2 characters")
-    title, source_url = _wikipedia_lookup(cleaned)
-    fetched_at = _now()
-    params = {"action": "parse", "page": title, "prop": "wikitext", "format": "json", "redirects": 1}
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=12.0) as client:
-        response = client.get(OPENSEARCH_URL, params=params)
-        response.raise_for_status()
-        wikitext = response.json()["parse"]["wikitext"]["*"]
-    raw_fields = extract_infobox_fields(wikitext)
-    if not raw_fields:
-        raise LookupError("No infobox spec fields found for %s" % title)
-    fields = {
-        name: {"value": value, "source_url": source_url, "fetched_at": fetched_at, "confidence": "medium"}
-        for name, value in raw_fields.items()
-    }
-    notes = "Raw infobox text. Missing model-specific values are omitted, not estimated."
-    if _tokens(cleaned) != _tokens(title):
-        notes = "Article title differs from the query. " + notes
+        raise ValueError("device_name must be at least 2 characters")
+    
+    # Cerca in cache prima
+    cached = _get_cached_specs(cleaned)
+    if cached:
+        return cached
+    
+    # Fetch da Wikipedia
+    title, wiki_url = _fetch_wikipedia_opensearch(cleaned)
+    
+    if not title or not wiki_url:
+        fields_missing = list(SPEC_FIELDS)
+        return {
+            "specs": {},
+            "source_url": None,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": _build_metadata("missing", [], fields_missing),
+            "from_cache": False
+        }
+    
+    infobox_fields = _fetch_wikipedia_infobox(title)
+    
+    fields_found = list(infobox_fields.keys())
+    fields_missing = [f for f in SPEC_FIELDS if f not in infobox_fields]
+    
+    if len(infobox_fields) < 3:
+        article_type = "family"
+    else:
+        article_type = "model"
+    
+    metadata = _build_metadata(article_type, fields_found, fields_missing)
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    
+    # Salva in cache
+    _cache_specs(cleaned, infobox_fields, wiki_url, fetched_at, metadata)
+    
     return {
-        "query": cleaned,
-        "name": title,
-        "source_name": "Wikipedia",
-        "source_url": source_url,
+        "specs": infobox_fields,
+        "source_url": wiki_url,
         "fetched_at": fetched_at,
-        "fields": fields,
-        "notes": notes,
+        "metadata": metadata,
+        "from_cache": False
     }
 
 
-TOOLS = {
-    "get_device": {
-        "description": "Find a device article and return its name plus canonical source URL. Does not invent benchmark scores.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "Device name, for example Pixel 8"}},
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-        "handler": get_device,
-    },
-    "get_specs": {
-        "description": "Return sourced Wikipedia infobox text. Does not invent normalized numbers or missing model specs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "Device name, for example Pixel 8"}},
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-        "handler": get_specs,
-    },
-}
-
-
-def handle_mcp_request(payload: dict):
-    if not isinstance(payload, dict):
-        return 400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}
-    method = payload.get("method")
-    request_id = payload.get("id")
-    params = payload.get("params") or {}
-    if method == "notifications/initialized":
-        return 202, None
+def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
+    """Gestisce richiesta MCP JSON-RPC con error handling robusto (correzione C)."""
+    try:
+        request = json.loads(request_body)
+    except json.JSONDecodeError as e:
+        return json.dumps({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32700, "message": f"Parse error: {e}"}
+        })
+    
+    jsonrpc = request.get("jsonrpc", "2.0")
+    req_id = request.get("id")
+    method = request.get("method")
+    params = request.get("params", {})
+    
     if method == "initialize":
-        return 200, {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": SERVER_INFO,
-            },
+        result = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         }
+        return json.dumps({"jsonrpc": jsonrpc, "id": req_id, "result": result})
+    
     if method == "tools/list":
-        return 200, {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "tools": [
-                    {"name": name, "description": tool["description"], "inputSchema": tool["inputSchema"]}
-                    for name, tool in TOOLS.items()
-                ]
+        tools = [
+            {
+                "name": "get_device",
+                "description": "Identifica dispositivo hardware da query (nome, URL Wikipedia, metadati)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
             },
-        }
+            {
+                "name": "get_specs",
+                "description": "Ottiene specifiche hardware da infobox Wikipedia con cache trasparente",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"device_name": {"type": "string"}},
+                    "required": ["device_name"]
+                }
+            }
+        ]
+        return json.dumps({"jsonrpc": jsonrpc, "id": req_id, "result": {"tools": tools}})
+    
     if method == "tools/call":
-        name = params.get("name")
-        arguments = params.get("arguments") or {}
-        tool = TOOLS.get(name)
-        if tool is None:
-            return 200, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Tool not found: %s" % name}}
+        tool_name = params.get("name")
+        args = params.get("arguments", {})
+        
         try:
-            result = tool["handler"](**arguments)
-            return 200, {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}], "isError": False},
-            }
-        except Exception as exc:
-            return 200, {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"content": [{"type": "text", "text": str(exc)}], "isError": True},
-            }
-    return 200, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found: %s" % method}}
+            if tool_name == "get_device":
+                query = args.get("query", "")
+                result = get_device(query)
+                content = [{"type": "text", "text": json.dumps(result, indent=2)}]
+                return json.dumps({"jsonrpc": jsonrpc, "id": req_id, "result": {"content": content}})
+            
+            if tool_name == "get_specs":
+                device_name = args.get("device_name", "")
+                result = get_specs(device_name)
+                content = [{"type": "text", "text": json.dumps(result, indent=2)}]
+                return json.dumps({"jsonrpc": jsonrpc, "id": req_id, "result": {"content": content}})
+            
+            return json.dumps({
+                "jsonrpc": jsonrpc,
+                "id": req_id,
+                "error": {"code": -32602, "message": f"Unknown tool: {tool_name}"}
+            })
+        
+        except ValueError as e:
+            return json.dumps({
+                "jsonrpc": jsonrpc,
+                "id": req_id,
+                "error": {"code": -32602, "message": f"Invalid params: {e}"}
+            })
+        
+        except httpx.HTTPError as e:
+            return json.dumps({
+                "jsonrpc": jsonrpc,
+                "id": req_id,
+                "error": {"code": -32603, "message": f"Source unavailable: {type(e).__name__}"}
+            })
+        
+        except Exception as e:
+            return json.dumps({
+                "jsonrpc": jsonrpc,
+                "id": req_id,
+                "error": {"code": -32603, "message": f"Internal error: {type(e).__name__}"}
+            })
+    
+    return json.dumps({
+        "jsonrpc": jsonrpc,
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"}
+    })
