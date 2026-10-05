@@ -59,6 +59,10 @@ def handler(environ: dict, start_response: callable) -> list[bytes]:
     return [b'{"error": "Not found"}']
 
 
+# Vercel Python runtime looks for a WSGI callable named `app`
+app = handler
+
+
 # Per esecuzione locale con wsgiref
 if __name__ == "__main__":
     from wsgiref.simple_server import make_server
