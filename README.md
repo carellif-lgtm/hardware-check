@@ -13,8 +13,10 @@ Produzione: https://hardware-check-main.vercel.app
 
 ## Tool
 
-`get_device` accetta `query` e interroga GSMArena. Restituisce nome, URL canonico, `fetched_at` e `confidence`. Non restituisce Geekbench, 3DMark o altre misure non lette dalla pagina.
+`get_device` accetta `query` e interroga l'API OpenSearch di Wikipedia. Restituisce nome, URL canonico, `fetched_at` e `confidence`.
+
+GSMArena risponde con un controllo Cloudflare dalle richieste di Vercel, quindi non è usabile come fonte server-side. Geekbench Browser risponde 403. I punteggi non vengono stimati.
 
 ## Database
 
-`db/schema.py` descrive le tabelle previste. Non sono state create: il connettore Neon non è disponibile in questa sessione e non c'è ancora un dato reale da salvare.
+`db/schema.py` descrive le tabelle previste. Non sono state create: Neon non è tra i connettori disponibili e non c'è ancora un dato di benchmark reale da salvare.

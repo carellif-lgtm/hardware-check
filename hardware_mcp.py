@@ -1,12 +1,11 @@
 import json
-import re
 from datetime import datetime, timezone
 
 import httpx
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "hardware-check", "version": "0.2.0"}
-SEARCH_URL = "https://www.gsmarena.com/res.php3"
+SERVER_INFO = {"name": "hardware-check", "version": "0.2.1"}
+SEARCH_URL = "https://en.wikipedia.org/w/api.php"
 
 
 def get_device(query: str) -> dict:
@@ -16,37 +15,40 @@ def get_device(query: str) -> dict:
 
     headers = {
         "User-Agent": "HardwareCheckMCP/0.2 (+https://github.com/carellif-lgtm/hardware-check)",
-        "Accept": "text/html",
+        "Accept": "application/json",
+    }
+    params = {
+        "action": "opensearch",
+        "search": cleaned,
+        "limit": 1,
+        "namespace": 0,
+        "format": "json",
     }
     with httpx.Client(headers=headers, follow_redirects=True, timeout=12.0) as client:
-        response = client.get(SEARCH_URL, params={"sSearch": cleaned})
+        response = client.get(SEARCH_URL, params=params)
         response.raise_for_status()
-        html = response.text
+        payload = response.json()
 
-    match = re.search(
-        r'href="([a-z0-9_]+-\d+\.php)"[^>]*>([^<]+)',
-        html,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        raise LookupError(f"No GSMArena device URL found for {cleaned!r}")
+    titles = payload[1] if len(payload) > 1 else []
+    urls = payload[3] if len(payload) > 3 else []
+    if not titles or not urls:
+        raise LookupError(f"No Wikipedia article found for {cleaned!r}")
 
-    source_url = "https://www.gsmarena.com/" + match.group(1)
     return {
         "query": cleaned,
-        "name": re.sub(r"\s+", " ", match.group(2)).strip(),
-        "category": "phone",
-        "source_name": "GSMArena",
-        "source_url": source_url,
+        "name": titles[0],
+        "category": "device",
+        "source_name": "Wikipedia",
+        "source_url": urls[0],
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "confidence": "medium",
-        "notes": "Name and canonical URL only. Benchmark scores are not inferred.",
+        "notes": "Identity and canonical URL only. GSMArena is blocked by Cloudflare from Vercel; benchmark scores are not inferred.",
     }
 
 
 TOOLS = {
     "get_device": {
-        "description": "Find a phone on GSMArena and return its name plus canonical source URL. Does not invent benchmark scores.",
+        "description": "Find a device article and return its name plus canonical source URL. Does not invent benchmark scores.",
         "inputSchema": {
             "type": "object",
             "properties": {
