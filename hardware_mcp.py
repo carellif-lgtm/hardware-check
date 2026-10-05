@@ -1,11 +1,10 @@
 import json
-import re
 from datetime import datetime, timezone
 
 import httpx
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "hardware-check", "version": "0.3.0"}
+SERVER_INFO = {"name": "hardware-check", "version": "0.3.1"}
 OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"
 SPEC_FIELDS = ("soc", "cpu", "memory", "storage", "display", "battery")
 HEADERS = {
@@ -18,37 +17,55 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _strip_links(value: str) -> str:
+    while "[[" in value and "]]" in value:
+        start = value.find("[[")
+        end = value.find("]]", start)
+        if end < 0:
+            break
+        label = value[start + 2:end].split("|")[-1]
+        value = value[:start] + label + value[end + 2:]
+    return value
+
+
 def _clean_wiki(value: str) -> str:
     value = value.replace("&nbsp;", " ").replace("\xa0", " ")
-    value = re.sub(r"<ref[^>]*>.*?</ref>", "", value, flags=re.IGNORECASE | re.DOTALL)
-    value = re.sub(r"<ref[^/]*/>", "", value, flags=re.IGNORECASE)
-    value = re.sub(r"\[\[(?:[^|\]]+\|)?([^\]]+)\]\]", r"\1", value)
-    value = re.sub(r"\{\{convert\|([^}]+)\}\", lambda m: " ".join(m.group(1).split("|")[:2]), value)
-    value = re.sub(r"\{\{(?:ubl|plainlist|flatlist)\|?", "", value, flags=re.IGNORECASE)
     value = value.replace("'''", "").replace("''", "")
-    value = re.sub(r"<br\s*/?>", "; ", value, flags=re.IGNORECASE)
+    value = value.replace("<br />", "; ").replace("<br/>", "; ").replace("<br>", "; ")
+    value = _strip_links(value)
+    value = value.replace("{{ubl", "").replace("{{plainlist", "").replace("{{flatlist", "")
     value = value.replace("}}", "").replace("{{", "")
-    value = re.sub(r"\s+", " ", value)
-    return value.strip(" ;|")
+    return " ".join(value.split()).strip(" ;|")
 
 
 def extract_infobox_fields(wikitext: str) -> dict:
     start = wikitext.find("{{Infobox")
     if start < 0:
         return {}
-    chunk = wikitext[start:]
+    current = None
+    buf = []
     fields = {}
-    for name in SPEC_FIELDS:
-        match = re.search(rf"\|\s*{name}\s*=\s*(.*?)(?=\n\|\s*[a-zA-Z0-9_]+\s*=)", chunk, flags=re.DOTALL)
-        if not match:
+    for line in wikitext[start:].splitlines()[1:]:
+        stripped = line.lstrip()
+        if stripped.startswith("|") and "=" in stripped:
+            if current in SPEC_FIELDS:
+                cleaned = _clean_wiki(" ".join(buf))
+                if cleaned:
+                    fields[current] = cleaned
+            name, _, rest = stripped[1:].partition("=")
+            current = name.strip()
+            buf = [rest]
             continue
-        cleaned = _clean_wiki(match.group(1))
+        if current:
+            buf.append(line)
+    if current in SPEC_FIELDS:
+        cleaned = _clean_wiki(" ".join(buf))
         if cleaned:
-            fields[name] = cleaned
+            fields[current] = cleaned
     return fields
 
 
-def _wikipedia_lookup(query: str) -> tuple[str, str]:
+def _wikipedia_lookup(query: str):
     params = {"action": "opensearch", "search": query, "limit": 1, "namespace": 0, "format": "json"}
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=12.0) as client:
         response = client.get(OPENSEARCH_URL, params=params)
@@ -57,7 +74,7 @@ def _wikipedia_lookup(query: str) -> tuple[str, str]:
     titles = payload[1] if len(payload) > 1 else []
     urls = payload[3] if len(payload) > 3 else []
     if not titles or not urls:
-        raise LookupError(f"No Wikipedia article found for {query!r}")
+        raise LookupError("No Wikipedia article found for %r" % query)
     return titles[0], urls[0]
 
 
@@ -91,14 +108,9 @@ def get_specs(query: str) -> dict:
         wikitext = response.json()["parse"]["wikitext"]["*"]
     raw_fields = extract_infobox_fields(wikitext)
     if not raw_fields:
-        raise LookupError(f"No infobox spec fields found for {title}")
+        raise LookupError("No infobox spec fields found for %s" % title)
     fields = {
-        name: {
-            "value": value,
-            "source_url": source_url,
-            "fetched_at": fetched_at,
-            "confidence": "medium",
-        }
+        name: {"value": value, "source_url": source_url, "fetched_at": fetched_at, "confidence": "medium"}
         for name, value in raw_fields.items()
     }
     return {
@@ -136,7 +148,7 @@ TOOLS = {
 }
 
 
-def handle_mcp_request(payload: dict) -> tuple[int, dict | None]:
+def handle_mcp_request(payload: dict):
     if not isinstance(payload, dict):
         return 400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}
     method = payload.get("method")
@@ -170,7 +182,7 @@ def handle_mcp_request(payload: dict) -> tuple[int, dict | None]:
         arguments = params.get("arguments") or {}
         tool = TOOLS.get(name)
         if tool is None:
-            return 200, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": f"Tool not found: {name}"}}
+            return 200, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Tool not found: %s" % name}}
         try:
             result = tool["handler"](**arguments)
             return 200, {
@@ -184,4 +196,4 @@ def handle_mcp_request(payload: dict) -> tuple[int, dict | None]:
                 "id": request_id,
                 "result": {"content": [{"type": "text", "text": str(exc)}], "isError": True},
             }
-    return 200, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+    return 200, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found: %s" % method}}
