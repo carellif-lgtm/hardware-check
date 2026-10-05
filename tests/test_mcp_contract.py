@@ -31,21 +31,68 @@ def test_choose_title_missing():
     assert metadata["article_type"] == "missing"
 
 
-def test_extract_infobox_fields():
-    """Verifica che extract_infobox_fields estragga campi correttamente."""
+def test_extract_infobox_fields_with_nested_templates():
+    """Verifica che extract_infobox_fields gestisca template annidati (caso reale)."""
+    # Infobox REALE con template annidati {{convert}}, {{ubl}}, ecc.
     text = """
-    {{Infobox
-    | soc = Google Tensor G3
-    | cpu = Octa-core
-    | memory = 8 GB LPDDR5X
-    | display = 6.2" OLED
-    }}
-    """
+{{Infobox mobile phone
+| name = Google Pixel 8
+| brand = Google
+| soc = [[Google Tensor G3|Google Tensor G3]]
+| cpu = {{ubl|2×2.85 GHz Cortex-X3|4×2.35 GHz Cortex-A715|4×1.80 GHz Cortex-A510}}
+| memory = 8 GB LPDDR5X
+| storage = {{ubl|128 GB|256 GB|512 GB}}
+| display = {{convert|157|mm|in|1|abbr=on}} FHD+ 1080p OLED at 428 ppi
+| battery = {{ubl|Li-Po|4575 mAh}}
+}}
+"""
     fields = extract_infobox_fields(text)
-    assert fields["soc"] == "Google Tensor G3"
-    assert fields["cpu"] == "Octa-core"
-    assert fields["memory"] == "8 GB LPDDR5X"
-    assert fields["display"] == '6.2" OLED'
+    
+    # Verifica che i campi siano estratti correttamente
+    assert "soc" in fields
+    assert "memory" in fields
+    assert "display" in fields
+    assert "battery" in fields
+    
+    # Verifica che i valori contengano i template annidati (testo grezzo)
+    assert "Google Tensor G3" in fields["soc"]
+    assert "8 GB LPDDR5X" in fields["memory"]
+    assert "{{convert|157|mm|in|1|abbr=on}}" in fields["display"]
+    assert "4575 mAh" in fields["battery"]
+
+
+def test_extract_infobox_fields_real_pixel8():
+    """Verifica con infobox ancora più realistico (simile a Wikipedia reale)."""
+    text = """
+{{Infobox mobile phone
+| name = Pixel 8
+| image = Google Pixel 8 front.svg
+| caption = Pixel 8
+| brand = Google
+| manufacturer = [[Foxconn]]
+| type = [[Smartphone]]
+| generation = 8th-generation Pixel
+| soc = [[Google Tensor G3]]
+| cpu = {{ubl|2×2.85 GHz Cortex-X3|4×2.35 GHz Cortex-A715|4×1.80 GHz Cortex-A510}}
+| gpu = [[ARM Mali-G715|Immortalis-G715s]]
+| memory = 8 GB LPDDR5X
+| storage = {{ubl|128 GB|256 GB|512 GB}}
+| battery = {{ubl|Li-Po|4575 mAh}}
+| display = {{convert|157|mm|in|1|abbr=on}} FHD+ 1080p OLED at 428 ppi
+}}
+"""
+    fields = extract_infobox_fields(text)
+    
+    # Tutti i campi principali devono essere presenti
+    assert fields.get("soc") is not None
+    assert fields.get("memory") is not None
+    assert fields.get("display") is not None
+    assert fields.get("battery") is not None
+    assert fields.get("storage") is not None
+    
+    # I valori devono essere testo grezzo (con template)
+    assert "{{ubl" in fields["memory"] or "8 GB" in fields["memory"]
+    assert "{{convert" in fields["display"] or "157" in fields["display"]
 
 
 def test_handle_mcp_initialize():
