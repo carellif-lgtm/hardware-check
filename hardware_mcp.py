@@ -1,12 +1,23 @@
 import json
+import re
 from datetime import datetime, timezone
 
 import httpx
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "hardware-check", "version": "0.3.3"}
+SERVER_INFO = {"name": "hardware-check", "version": "0.3.4"}
 OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"
-SPEC_FIELDS = ("soc", "cpu", "memory", "storage", "display", "battery")
+SPEC_FIELDS = (
+    "soc",
+    "cpu",
+    "processor",
+    "system_on_chip",
+    "graphics",
+    "memory",
+    "storage",
+    "display",
+    "battery",
+)
 HEADERS = {
     "User-Agent": "HardwareCheckMCP/0.3 (+https://github.com/carellif-lgtm/hardware-check)",
     "Accept": "application/json",
@@ -15,6 +26,27 @@ HEADERS = {
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _tokens(value: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def choose_title(query: str, titles: list) -> str:
+    query_tokens = _tokens(query)
+    best = None
+    best_score = 0
+    for title in titles:
+        title_tokens = _tokens(title)
+        if not query_tokens or not title_tokens:
+            continue
+        score = len(query_tokens & title_tokens) / len(query_tokens)
+        if score > best_score or (score == best_score and best and len(title) < len(best)):
+            best = title
+            best_score = score
+    if best is None or best_score < 0.5:
+        raise LookupError("No Wikipedia article found for %r" % query)
+    return best
 
 
 def _strip_links(value: str) -> str:
@@ -67,7 +99,7 @@ def _field_start(line):
     if "=" not in body:
         return None
     name, _, rest = body.partition("=")
-    name = name.strip()
+    name = name.strip().lower()
     if not name or not all(ch.isalnum() or ch == "_" for ch in name):
         return None
     return name, rest
@@ -100,16 +132,24 @@ def extract_infobox_fields(wikitext: str) -> dict:
 
 
 def _wikipedia_lookup(query: str):
-    params = {"action": "opensearch", "search": query, "limit": 1, "namespace": 0, "format": "json"}
+    params = {"action": "opensearch", "search": query, "limit": 5, "namespace": 0, "format": "json"}
+    search_params = {"action": "query", "list": "search", "srsearch": query, "srlimit": 5, "format": "json"}
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=12.0) as client:
         response = client.get(OPENSEARCH_URL, params=params)
         response.raise_for_status()
         payload = response.json()
-    titles = payload[1] if len(payload) > 1 else []
-    urls = payload[3] if len(payload) > 3 else []
-    if not titles or not urls:
-        raise LookupError("No Wikipedia article found for %r" % query)
-    return titles[0], urls[0]
+        searched = client.get(OPENSEARCH_URL, params=search_params)
+        searched.raise_for_status()
+        hits = searched.json().get("query", {}).get("search", [])
+    titles = list(payload[1] if len(payload) > 1 else [])
+    urls = list(payload[3] if len(payload) > 3 else [])
+    by_title = {title: url for title, url in zip(titles, urls)}
+    for hit in hits:
+        title = hit.get("title")
+        if title and title not in by_title:
+            by_title[title] = "https://en.wikipedia.org/wiki/" + title.replace(" ", "_")
+    title = choose_title(query, list(by_title))
+    return title, by_title[title]
 
 
 def get_device(query: str) -> dict:
@@ -117,6 +157,9 @@ def get_device(query: str) -> dict:
     if len(cleaned) < 2:
         raise ValueError("query must be at least 2 characters")
     title, source_url = _wikipedia_lookup(cleaned)
+    notes = "Identity and canonical URL only. Benchmark scores are not inferred."
+    if _tokens(cleaned) != _tokens(title):
+        notes = "Matched a related Wikipedia article, not a separate page for the exact query. " + notes
     return {
         "query": cleaned,
         "name": title,
@@ -125,7 +168,7 @@ def get_device(query: str) -> dict:
         "source_url": source_url,
         "fetched_at": _now(),
         "confidence": "medium",
-        "notes": "Identity and canonical URL only. GSMArena is blocked by Cloudflare from Vercel; benchmark scores are not inferred.",
+        "notes": notes,
     }
 
 
@@ -147,6 +190,9 @@ def get_specs(query: str) -> dict:
         name: {"value": value, "source_url": source_url, "fetched_at": fetched_at, "confidence": "medium"}
         for name, value in raw_fields.items()
     }
+    notes = "Raw infobox text. Missing model-specific values are omitted, not estimated."
+    if _tokens(cleaned) != _tokens(title):
+        notes = "Article title differs from the query. " + notes
     return {
         "query": cleaned,
         "name": title,
@@ -154,7 +200,7 @@ def get_specs(query: str) -> dict:
         "source_url": source_url,
         "fetched_at": fetched_at,
         "fields": fields,
-        "notes": "Raw infobox text. Multi-variant articles are not collapsed into one ram_gb, storage_gb, display size, or battery_wh. Convert templates keep the first value and unit only.",
+        "notes": notes,
     }
 
 
@@ -170,7 +216,7 @@ TOOLS = {
         "handler": get_device,
     },
     "get_specs": {
-        "description": "Return sourced Wikipedia infobox text for soc, memory, storage, display, and battery. Does not invent normalized numbers.",
+        "description": "Return sourced Wikipedia infobox text. Does not invent normalized numbers or missing model specs.",
         "inputSchema": {
             "type": "object",
             "properties": {"query": {"type": "string", "description": "Device name, for example Pixel 8"}},
