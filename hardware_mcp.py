@@ -9,12 +9,13 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_VERSION = "1.1.3"
+SERVER_VERSION = "1.2.0"
 SERVER_NAME = "hardware-check"
+PARSER_VERSION = "1.2"  # Per invalidazione cache
 
 # User-Agent per Wikipedia
 HEADERS = {
-    "User-Agent": "hardware-check-mcp/1.1 (github.com/carellif-lgtm/hardware-check; contact: carellif-lgtm)",
+    "User-Agent": "hardware-check-mcp/1.2 (github.com/carellif-lgtm/hardware-check; contact: carellif-lgtm)",
     "Accept": "application/json",
 }
 
@@ -47,7 +48,7 @@ def _get_db_connection():
 
 
 def _get_cached_specs(device_name: str) -> dict | None:
-    """Cerca specifiche in cache con TTL 24h."""
+    """Cerca specifiche in cache con TTL 24h e parser_version."""
     conn = _get_db_connection()
     if not conn:
         return None
@@ -59,8 +60,9 @@ def _get_cached_specs(device_name: str) -> dict | None:
                 FROM cache_specs
                 WHERE device_name = %s
                 AND expires_at > %s
+                AND (parser_version = %s OR parser_version IS NULL)
                 LIMIT 1
-            """, (device_name, datetime.now(timezone.utc)))
+            """, (device_name, datetime.now(timezone.utc), PARSER_VERSION))
             row = cur.fetchone()
             
             if row:
@@ -82,7 +84,7 @@ def _get_cached_specs(device_name: str) -> dict | None:
 
 
 def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str, metadata: dict) -> None:
-    """Salva specifiche in cache (silente se DB non disponibile)."""
+    """Salva specifiche in cache con parser_version (silente se DB non disponibile)."""
     conn = _get_db_connection()
     if not conn:
         return
@@ -90,8 +92,8 @@ def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO cache_specs (device_name, specs_json, source_url, fetched_at, metadata_json, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO cache_specs (device_name, specs_json, source_url, fetched_at, metadata_json, expires_at, parser_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (device_name) DO UPDATE
                 SET 
                     specs_json = EXCLUDED.specs_json,
@@ -99,14 +101,16 @@ def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str
                     fetched_at = EXCLUDED.fetched_at,
                     metadata_json = EXCLUDED.metadata_json,
                     cached_at = NOW(),
-                    expires_at = EXCLUDED.expires_at
+                    expires_at = EXCLUDED.expires_at,
+                    parser_version = EXCLUDED.parser_version
             """, (
                 device_name,
                 specs,
                 source_url,
                 datetime.fromisoformat(fetched_at.replace("Z", "+00:00")),
                 Json(metadata),
-                datetime.now(timezone.utc) + timedelta(hours=CACHE_TTL_HOURS)
+                datetime.now(timezone.utc) + timedelta(hours=CACHE_TTL_HOURS),
+                PARSER_VERSION
             ))
             conn.commit()
     except psycopg2.OperationalError:
@@ -145,8 +149,16 @@ def _fetch_wikipedia_opensearch(query: str) -> tuple[str | None, str | None]:
                 title = data[1][0]
                 link = data[3][0] if len(data) >= 4 and len(data[3]) >= 1 else None
                 return title, link
+    except httpx.TimeoutException:
+        return None  # Timeout: trattato come missing
+    except httpx.ConnectError:
+        return None  # Connect error: trattato come missing
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None  # 404: realmente missing
+        return None  # Altri errori HTTP: trattati come missing
     except Exception:
-        pass
+        return None  # Errori imprevisti: trattati come missing
     return None, None
 
 
@@ -176,8 +188,14 @@ def _fetch_wikipedia_infobox(title: str) -> dict | None:
                     return None
                 text = revisions[0].get("slots", {}).get("main", {}).get("*", "")
                 return _parse_infobox_robust(text)
+    except httpx.TimeoutException:
+        return None
+    except httpx.ConnectError:
+        return None
+    except httpx.HTTPStatusError:
+        return None
     except Exception:
-        pass
+        return None
     return None
 
 
@@ -490,5 +508,5 @@ def handle_mcp_request(request_body: str, environ: dict | None = None) -> str:
     return json.dumps({
         "jsonrpc": jsonrpc,
         "id": req_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"}
+        "error": {"code": -32601, "message": f"Method not found: {method}"
     })
