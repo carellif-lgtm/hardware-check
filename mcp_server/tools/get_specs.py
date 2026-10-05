@@ -1,4 +1,3 @@
-def get_specs(device_id: str) -> dict:
-    raise NotImplementedError(
-        "Specs are not inferred. Use get_device for a sourced GSMArena URL."
-    )
+from hardware_mcp import get_specs
+
+__all__ = ["get_specs"]

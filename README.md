@@ -1,22 +1,31 @@
 # hardware-check
 
-Health check pubblico e server MCP minimo per identificare un dispositivo e citare la fonte.
-
-Non inventa punteggi di benchmark. Se la fonte non restituisce un URL, il tool fallisce.
-
-## Endpoint
-
-- `GET /` e `GET /api`: health check.
-- `POST /mcp`: JSON-RPC MCP (`initialize`, `tools/list`, `tools/call`).
+Server MCP minimo che identifica un dispositivo e cita la fonte. Non inventa punteggi di benchmark e non riduce un articolo multi-variante a un solo numero.
 
 Produzione: https://hardware-check-main.vercel.app
 
+## Endpoint verificati
+
+- `GET /` e `GET /api`: health check.
+- `POST /mcp`: una richiesta JSON-RPC, risposta JSON. Metodi: `initialize`, `tools/list`, `tools/call`.
+
+Questo non è il trasporto MCP streamable HTTP con sessione SSE. Un client che richiede quel trasporto non si collega senza un adattatore.
+
+Esempio:
+
+```bash
+curl -s https://hardware-check-main.vercel.app/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_device","arguments":{"query":"Pixel 8"}}}'
+```
+
 ## Tool
 
-`get_device` accetta `query` e interroga l'API OpenSearch di Wikipedia. Restituisce nome, URL canonico, `fetched_at` e `confidence`.
+- `get_device`: nome e URL canonico da Wikipedia OpenSearch.
+- `get_specs`: testo dell'infobox Wikipedia per `soc`, `cpu`, `memory`, `storage`, `display`, `battery`, solo se presente. Ogni campo ha `source_url`, `fetched_at` e `confidence`. I campi vuoti sono omessi.
 
-GSMArena risponde con un controllo Cloudflare dalle richieste di Vercel, quindi non è usabile come fonte server-side. Geekbench Browser risponde 403. I punteggi non vengono stimati.
+`get_benchmarks` non è esposto. Geekbench Browser risponde 403 e GSMArena risponde con un controllo Cloudflare dalle richieste di Vercel.
 
 ## Database
 
-`db/schema.py` descrive le tabelle previste. Non sono state create: Neon non è tra i connettori disponibili e non c'è ancora un dato di benchmark reale da salvare.
+`db/schema.py` descrive tabelle previste. In questa sessione Neon non è un connettore disponibile, quindi non è stato verificato se le tabelle esistono e non è stato scritto alcun dato.
