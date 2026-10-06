@@ -114,7 +114,7 @@ def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str
                     parser_version = EXCLUDED.parser_version
             """, (
                 device_name,
-                specs,
+                Json(specs),
                 source_url,
                 datetime.fromisoformat(fetched_at.replace("Z", "+00:00")),
                 Json(metadata),
