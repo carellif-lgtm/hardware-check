@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -7,6 +8,8 @@ from typing import Any
 import httpx
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
+
+logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_VERSION = "1.2.0"
@@ -37,13 +40,16 @@ CACHE_TTL_HOURS = 24
 def _get_db_connection():
     """Ottiene connessione DB con fallback graceful."""
     if not DATABASE_URL:
+        logger.warning("cache disabled: DATABASE_URL not set")
         return None
     try:
         conn = psycopg2.connect(DATABASE_URL)
         return conn
-    except psycopg2.OperationalError:
+    except psycopg2.OperationalError as e:
+        logger.error("cache db connection failed: %s", type(e).__name__)
         return None
-    except Exception:
+    except Exception as e:
+        logger.error("cache db connection failed: %s", type(e).__name__)
         return None
 
 
@@ -64,8 +70,9 @@ def _get_cached_specs(device_name: str) -> dict | None:
                 LIMIT 1
             """, (device_name, datetime.now(timezone.utc), PARSER_VERSION))
             row = cur.fetchone()
-            
+
             if row:
+                logger.info("cache hit device=%s", device_name[:80])
                 return {
                     "specs": row['specs_json'],
                     "source_url": row['source_url'],
@@ -73,10 +80,11 @@ def _get_cached_specs(device_name: str) -> dict | None:
                     "metadata": row['metadata_json'],
                     "from_cache": True
                 }
-    except psycopg2.OperationalError:
-        pass
-    except Exception:
-        pass
+            logger.info("cache miss device=%s", device_name[:80])
+    except psycopg2.OperationalError as e:
+        logger.error("cache read failed: %s device=%s", type(e).__name__, device_name[:80])
+    except Exception as e:
+        logger.error("cache read failed: %s device=%s", type(e).__name__, device_name[:80])
     finally:
         conn.close()
     
@@ -87,8 +95,9 @@ def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str
     """Salva specifiche in cache con parser_version (silente se DB non disponibile)."""
     conn = _get_db_connection()
     if not conn:
+        logger.warning("cache write skipped: no connection device=%s", device_name[:80])
         return
-    
+
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -105,7 +114,7 @@ def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str
                     parser_version = EXCLUDED.parser_version
             """, (
                 device_name,
-                specs,
+                Json(specs),
                 source_url,
                 datetime.fromisoformat(fetched_at.replace("Z", "+00:00")),
                 Json(metadata),
@@ -113,9 +122,12 @@ def _cache_specs(device_name: str, specs: dict, source_url: str, fetched_at: str
                 PARSER_VERSION
             ))
             conn.commit()
-    except psycopg2.OperationalError:
+            logger.info("cache write ok device=%s parser_version=%s", device_name[:80], PARSER_VERSION)
+    except psycopg2.OperationalError as e:
+        logger.error("cache write failed: %s device=%s", type(e).__name__, device_name[:80])
         conn.rollback()
-    except Exception:
+    except Exception as e:
+        logger.error("cache write failed: %s device=%s", type(e).__name__, device_name[:80])
         conn.rollback()
     finally:
         conn.close()
