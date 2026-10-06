@@ -18,6 +18,22 @@ Il display non è normalizzato. Per Pixel 8, verificato il 5 ottobre 2026, il va
 - `"157 mm FHD+ 1080p OLED at 428 ppi"` o simile (dipende dall'infobox)
 - NON convertito in "6.2 pollici"
 
+## Versioni
+
+| Variabile | Valore | Descrizione |
+|---|---|---|
+| `SERVER_VERSION` | `1.2.0` | Versione server MCP/API |
+| `PARSER_VERSION` | `1.2` | Versione parser/cache |
+| `PROTOCOL_VERSION` | `2024-11-05` | Versione protocollo MCP |
+
+### Verifica live
+
+```bash
+curl -s https://hardware-check-main.vercel.app/ | jq .
+```
+
+Il campo `version` dell'health check coincide con `SERVER_VERSION`.
+
 ## Esempi
 
 ### Health check
