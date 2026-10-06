@@ -66,7 +66,7 @@ def _get_cached_specs(device_name: str) -> dict | None:
                 FROM cache_specs
                 WHERE device_name = %s
                 AND expires_at > %s
-                AND (parser_version = %s OR parser_version IS NULL)
+                AND parser_version = %s
                 LIMIT 1
             """, (device_name, datetime.now(timezone.utc), PARSER_VERSION))
             row = cur.fetchone()
