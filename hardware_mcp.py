@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import httpx
 import psycopg2
-from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+from psycopg2.extensions import ISOLATION_LEVEL_READ_COMMITTED, TRANSACTION_STATUS_IDLE
 from psycopg2.extras import RealDictCursor, Json
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,8 @@ FETCH_CONNECT_TIMEOUT_S = _env_positive_float("FETCH_CONNECT_TIMEOUT_S", 3.0)
 FETCH_READ_TIMEOUT_S = _env_positive_float("FETCH_READ_TIMEOUT_S", 5.0)
 FETCH_WRITE_TIMEOUT_S = _env_positive_float("FETCH_WRITE_TIMEOUT_S", 5.0)
 FETCH_POOL_TIMEOUT_S = _env_positive_float("FETCH_POOL_TIMEOUT_S", 3.0)
+DB_CONNECT_TIMEOUT_S = _env_positive_float("DB_CONNECT_TIMEOUT_S", 10.0)
+DB_STATEMENT_TIMEOUT_S = _env_positive_float("DB_STATEMENT_TIMEOUT_S", 30.0)
 
 FETCH_TIMEOUT = httpx.Timeout(
     connect=FETCH_CONNECT_TIMEOUT_S,
@@ -72,12 +74,26 @@ FETCH_TIMEOUT = httpx.Timeout(
 )
 
 
-def _lock_timeout_literal() -> str:
-    """lock_timeout per SET LOCAL, in millisecondi (es. '15000ms').
+def _ms_literal(seconds: float) -> str:
+    """Durata per SET LOCAL, in millisecondi (es. '15000ms').
 
     Minimo 1ms: in PostgreSQL '0ms' disabiliterebbe il timeout (attesa infinita).
     """
-    return f"{max(1, int(CACHE_LOCK_TIMEOUT_S * 1000))}ms"
+    return f"{max(1, int(seconds * 1000))}ms"
+
+
+def _lock_timeout_literal() -> str:
+    """lock_timeout per SET LOCAL (es. '15000ms')."""
+    return _ms_literal(CACHE_LOCK_TIMEOUT_S)
+
+
+def _statement_timeout_literal() -> str:
+    """statement_timeout per SET LOCAL (es. '30000ms').
+
+    Copre anche l'attesa del lock: se più corto di lock_timeout, l'abort arriva come
+    QueryCanceled (loggato come 'cache unavailable', non come cache_lock_timeout).
+    """
+    return _ms_literal(DB_STATEMENT_TIMEOUT_S)
 
 
 class CacheStatus(Enum):
@@ -98,7 +114,17 @@ def _get_db_connection():
         logger.warning("cache disabled: DATABASE_URL not set")
         return None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        # libpq accetta solo interi per connect_timeout ("10.0" fa fallire ogni
+        # connessione); valori < 2 sono comunque trattati come 2.
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            connect_timeout=max(2, math.ceil(DB_CONNECT_TIMEOUT_S)),
+        )
+        # La seconda SELECT dopo l'advisory lock deve vedere il COMMIT di chi ha
+        # fetchato prima: serve READ COMMITTED (snapshot per statement), qualunque
+        # sia default_transaction_isolation. Chi inietta una propria connessione in
+        # _resolve_specs_with_lock deve garantirlo da sé.
+        conn.set_isolation_level(ISOLATION_LEVEL_READ_COMMITTED)
         return conn
     except psycopg2.OperationalError as e:
         logger.error("cache db connection failed: %s", type(e).__name__)
@@ -218,6 +244,8 @@ def _resolve_specs_with_lock(
         try:
             conn.autocommit = False
 
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = %s", (_statement_timeout_literal(),))
             cached = _select_cached_specs(conn, device_name)
             conn.rollback()
             if cached:
@@ -227,6 +255,7 @@ def _resolve_specs_with_lock(
 
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL lock_timeout = %s", (_lock_timeout_literal(),))
+                cur.execute("SET LOCAL statement_timeout = %s", (_statement_timeout_literal(),))
                 cur.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (_advisory_lock_key(device_name),),
@@ -239,7 +268,12 @@ def _resolve_specs_with_lock(
                 return CacheResolutionResult(CacheStatus.HIT, cached)
         except psycopg2.errors.LockNotAvailable:
             _safe_rollback(conn)
-            logger.warning("cache lock timeout device=%s lock_timeout=%s", log_name, _lock_timeout_literal())
+            # Marcatore cercabile nei log (osservabilità dei fallback dopo lock_timeout).
+            logger.warning(
+                "cache_lock_timeout device=%s lock_timeout=%s",
+                log_name,
+                _lock_timeout_literal(),
+            )
             return CacheResolutionResult(CacheStatus.UNAVAILABLE)
         except psycopg2.Error as e:
             _safe_rollback(conn)

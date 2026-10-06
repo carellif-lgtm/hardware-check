@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import os
 import pathlib
@@ -6,6 +7,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import httpx
 import psycopg2
@@ -710,3 +712,155 @@ def test_fetch_timeout_uses_env_defaults():
     assert timeout.read == hardware_mcp.FETCH_READ_TIMEOUT_S
     assert timeout.write == hardware_mcp.FETCH_WRITE_TIMEOUT_S
     assert timeout.pool == hardware_mcp.FETCH_POOL_TIMEOUT_S
+
+
+# --- E5 / E6 / CQ-5: isolation, DB timeouts, lock-timeout marker -------------
+
+
+def repeatable_read_default_url():
+    """DATABASE_URL con default_transaction_isolation forzato a REPEATABLE READ."""
+    option = quote("-c default_transaction_isolation=repeatable\\ read", safe="")
+    separator = "&" if "?" in DATABASE_URL else "?"
+    return f"{DATABASE_URL}{separator}options={option}"
+
+
+def show(conn, setting):
+    with conn.cursor() as cur:
+        cur.execute(f"SHOW {setting}")
+        value = cur.fetchone()[0]
+    conn.rollback()
+    return value
+
+
+def test_db_connection_forces_read_committed_under_repeatable_read_default(db, monkeypatch):
+    url = repeatable_read_default_url()
+
+    # Controllo negativo: senza il fix l'ambiente del test è davvero REPEATABLE READ.
+    raw = psycopg2.connect(url)
+    try:
+        assert show(raw, "transaction_isolation") == "repeatable read"
+    finally:
+        raw.close()
+
+    monkeypatch.setattr(hardware_mcp, "DATABASE_URL", url)
+    conns = [hardware_mcp._get_db_connection(), hardware_mcp._get_db_connection()]
+    try:
+        for conn in conns:
+            assert conn is not None
+            assert show(conn, "transaction_isolation") == "read committed"
+            # Per transazione (BEGIN ISOLATION LEVEL), non per sessione: compatibile
+            # con il pooler in transaction mode.
+            assert show(conn, "default_transaction_isolation") == "repeatable read"
+
+        fetch = CountingFetch(delay=0.5)
+        barrier = threading.Barrier(2)
+        results = [None, None]
+        errors = []
+
+        def worker(index):
+            try:
+                barrier.wait(timeout=5)
+                results[index] = hardware_mcp._resolve_specs_with_lock(
+                    conns[index], DEVICE_NAME, fetch=fetch
+                )
+            except Exception as exc:  # pragma: no cover - surfaced by assert below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+    finally:
+        for conn in conns:
+            if conn is not None:
+                conn.close()
+
+    assert errors == []
+    assert fetch.count == 1
+    assert sorted(r.payload["from_cache"] for r in results) == [False, True]
+    assert count_rows(db) == 1
+
+
+@pytest.mark.parametrize(("seconds", "expected"), [(10.0, "10"), (0.5, "2")])
+def test_db_connection_uses_integer_connect_timeout(monkeypatch, seconds, expected):
+    monkeypatch.setattr(hardware_mcp, "DATABASE_URL", DATABASE_URL)
+    monkeypatch.setattr(hardware_mcp, "DB_CONNECT_TIMEOUT_S", seconds)
+
+    conn = hardware_mcp._get_db_connection()
+    try:
+        assert conn is not None
+        assert conn.get_dsn_parameters()["connect_timeout"] == expected
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def test_statement_timeout_set_in_both_transactions(db, connect, monkeypatch):
+    monkeypatch.setattr(hardware_mcp, "DB_STATEMENT_TIMEOUT_S", 0.25)
+    observed = []
+    real_select = hardware_mcp._select_cached_specs
+
+    def observing_select(conn, device_name):
+        observed.append(show_in_transaction(conn, "statement_timeout"))
+        return real_select(conn, device_name)
+
+    monkeypatch.setattr(hardware_mcp, "_select_cached_specs", observing_select)
+
+    conn = connect()
+    result = hardware_mcp._resolve_specs_with_lock(conn, DEVICE_NAME, fetch=CountingFetch())
+
+    assert result.status is CacheStatus.LIVE_FETCHED
+    assert observed == ["250ms", "250ms"]
+    # SET LOCAL non deve sopravvivere alle transazioni.
+    assert show(conn, "statement_timeout") == "0"
+
+
+def show_in_transaction(conn, setting):
+    """SHOW senza chiudere la transazione corrente (vede i SET LOCAL)."""
+    with conn.cursor() as cur:
+        cur.execute(f"SHOW {setting}")
+        return cur.fetchone()[0]
+
+
+def test_statement_timeout_aborts_slow_query(db, connect, monkeypatch):
+    monkeypatch.setattr(hardware_mcp, "DB_STATEMENT_TIMEOUT_S", 0.2)
+    conn = connect()
+
+    def slow_fetch(device_name):
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_sleep(2)")
+        return CountingFetch()(device_name)
+
+    started = time.monotonic()
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        hardware_mcp._resolve_specs_with_lock(conn, DEVICE_NAME, fetch=slow_fetch)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5
+    assert conn.get_transaction_status() == TRANSACTION_STATUS_IDLE
+    assert count_rows(db) == 0
+    assert advisory_lock_is_free(connect()) is True
+
+
+def test_lock_timeout_logs_searchable_marker(db, connect, monkeypatch, caplog):
+    holder = connect()
+    hold_advisory_lock(holder)
+    monkeypatch.setattr(hardware_mcp, "CACHE_LOCK_TIMEOUT_S", 0.2)
+    caplog.set_level(logging.WARNING, logger="hardware_mcp")
+
+    result = hardware_mcp._resolve_specs_with_lock(connect(), DEVICE_NAME, fetch=CountingFetch())
+
+    assert result.status is CacheStatus.UNAVAILABLE
+    markers = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "cache_lock_timeout" in record.getMessage()
+    ]
+    assert len(markers) == 1
+
+
+@pytest.mark.parametrize(("seconds", "literal"), [(30.0, "30000ms"), (0.0001, "1ms")])
+def test_statement_timeout_literal_is_milliseconds(monkeypatch, seconds, literal):
+    monkeypatch.setattr(hardware_mcp, "DB_STATEMENT_TIMEOUT_S", seconds)
+    assert hardware_mcp._statement_timeout_literal() == literal
