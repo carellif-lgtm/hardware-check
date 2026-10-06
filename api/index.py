@@ -6,7 +6,7 @@ from typing import Any
 # Aggiungi parent directory al path per importare hardware_mcp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hardware_mcp import handle_mcp_request
+from hardware_mcp import SERVER_VERSION, handle_mcp_request
 
 
 def handler(environ: dict, start_response: callable) -> list[bytes]:
@@ -20,7 +20,7 @@ def handler(environ: dict, start_response: callable) -> list[bytes]:
             body = json.dumps({
                 "status": "ok",
                 "service": "hardware-check",
-                "version": "1.1.3"
+                "version": SERVER_VERSION
             })
             start_response("200 OK", [("Content-Type", "application/json")])
             return [body.encode("utf-8")]
